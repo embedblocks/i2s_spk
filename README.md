@@ -214,6 +214,24 @@ must not be called from an ISR (unlike `i2s_mic_request_buffer()`, which is
 dual-context-safe). There is no ISR-context rule set for it to follow,
 because there is no ISR-context code path on the TX side at all.
 
+**MONO slot_mode has been observed to behave differently across chip
+families.** On classic ESP32, configuring `i2s_spk` with
+`I2S_SLOT_MODE_MONO` was found (via this repository's own uart-bridge
+example) to produce audio on only ONE physical DAC/amp output channel —
+the other stayed silent — while the exact same configuration plays
+correctly on both channels on ESP32-C3. This is a difference in how each
+chip's I2S TX hardware interprets a MONO slot request, not a bug in
+`i2s_spk` itself: the component passes `slot_mode` straight to ESP-IDF's
+driver unchanged, and this is the TX-side counterpart to the RX-side mono
+ambiguity already documented on `i2s_mic`. If you're driving mono audio to
+a stereo-input DAC/amp (as both example projects in this distribution do),
+the robust fix — used in all of this distribution's examples — is to
+request `I2S_SLOT_MODE_STEREO` with `channel_count = 2` and duplicate each
+sample into both slots yourself in application code, rather than rely on
+which chips currently happen to duplicate a MONO source correctly. See
+`upmix_mono_to_stereo()` in any of the example `app_main.c` files for a
+minimal implementation of this.
+
 **No underrun detection, by design — see below** for why this component
 deliberately does not add one, and where an approximate signal for it
 actually lives.
@@ -327,6 +345,10 @@ behavior beyond those four points.
   assignment on chips where both can run together.
 - No software-level underrun detection (see "On underrun/overrun tracking"
   above) — only the application-level heuristic both examples implement.
+- `I2S_SLOT_MODE_MONO` is not portable across chip families in practice —
+  see "MONO slot_mode has been observed to behave differently across chip
+  families" above. All examples in this distribution avoid it entirely by
+  using STEREO with duplicated samples instead.
 
 ---
 
