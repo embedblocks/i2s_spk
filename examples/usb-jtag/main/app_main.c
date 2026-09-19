@@ -98,15 +98,34 @@
 #define TAG            "SPK_JTAG"
 
 /* ---- Audio / I2S configuration ----------------------------------------
- * True mono, 16-bit, 16 kHz. Unlike i2s_mic's RX examples, there is no
- * documented mono-mode TX interleaving bug motivating a stereo workaround
- * here — that issue was specific to the RX path (see i2s_mic's README).
- * The PC-side script converts/resamples the source WAV to exactly this
- * format before sending; see spk_audio_send.py. */
+ * Mono, 16-bit, 16 kHz audio. The PC-side script converts/resamples the
+ * source WAV to exactly this format before sending; see
+ * spk_audio_send.py. That's the WIRE format only, though — see the note
+ * on SPK_CHANNEL_COUNT below for what's actually requested from i2s_spk.
+ *
+ * CORRECTION (this comment previously claimed there was no TX-side
+ * equivalent of i2s_mic's mono-mode RX quirk — that turned out to be
+ * wrong, just not visible on this chip). On classic ESP32, requesting
+ * I2S_SLOT_MODE_MONO from i2s_spk was found to produce audio on only ONE
+ * physical DAC/amp output channel; the ESP32-C3 this example targets
+ * happens not to exhibit that behavior, which is why it went unnoticed
+ * here. See upmix_mono_to_stereo() below for the fix this example now
+ * uses regardless of chip, to avoid depending on which chips currently
+ * happen to handle MONO correctly. */
 #define SAMPLE_RATE       16000
 #define BITS_PER_SAMPLE   16
-#define CHANNEL_COUNT     1
-#define BYTES_PER_FRAME   (CHANNEL_COUNT * (BITS_PER_SAMPLE / 8))
+
+/* WIRE_CHANNEL_COUNT describes the mono PCM format the PC sends over the
+ * wire (spk_audio_send.py always converts to mono) — used for the audio
+ * header and the underrun-heuristic duration math below, both of which
+ * are about the wire format, not what actually goes to the DAC.
+ *
+ * SPK_CHANNEL_COUNT is what's actually requested from i2s_spk: STEREO,
+ * not MONO, with each sample duplicated into both slots — see
+ * upmix_mono_to_stereo() for why. */
+#define WIRE_CHANNEL_COUNT   1
+#define SPK_CHANNEL_COUNT    2
+#define BYTES_PER_FRAME      (WIRE_CHANNEL_COUNT * (BITS_PER_SAMPLE / 8))
 
 #define GPIO_BCK          4
 #define GPIO_WS           3
@@ -130,7 +149,8 @@
 #define TRIGGER_BYTE      0xA5
 #define ACK_BYTE          0x06   /* ASCII ACK */
 #define AUDIO_MAGIC       0xC0FFEE02u
-#define CHUNK_BYTES       4096   /* max PCM payload per chunk; must match
+#define CHUNK_BYTES       4096   /* max mono PCM payload per chunk, as
+                                   * received from the PC; must match
                                    * CHUNK_BYTES in spk_audio_send.py */
 
 typedef struct {
@@ -141,7 +161,8 @@ typedef struct {
     uint8_t  channel_count;
 } __attribute__((packed)) audio_header_t;
 
-static uint8_t s_chunk_buf[CHUNK_BYTES];
+static uint8_t s_chunk_buf[CHUNK_BYTES];        /* raw mono PCM received from the PC */
+static uint8_t s_stereo_buf[CHUNK_BYTES * 2];   /* upmixed L=R stereo PCM handed to i2s_spk */
 
 /* ---- Best-effort telemetry (see i2s_spk's README, "On underrun/overrun
  * tracking", for why these live here at the application layer rather than
@@ -178,6 +199,24 @@ static void write_exact(const uint8_t *src, size_t len)
     }
 }
 
+/* Duplicate each mono 16-bit sample into both L and R slots of an
+ * interleaved stereo buffer — see the corrected comment at the top of
+ * this file (near WIRE_CHANNEL_COUNT/SPK_CHANNEL_COUNT) for why this
+ * example requests STEREO from i2s_spk instead of MONO. This changes what
+ * i2s_spk is configured for, NOT the wire protocol — the PC still sends
+ * plain mono PCM; only this local buffer, right before
+ * i2s_spk_send_buffer(), is upmixed. */
+static void upmix_mono_to_stereo(const uint8_t *mono_bytes, size_t mono_len, uint8_t *stereo_bytes)
+{
+    const int16_t *src = (const int16_t *)mono_bytes;
+    int16_t *dst = (int16_t *)stereo_bytes;
+    size_t num_samples = mono_len / sizeof(int16_t);
+    for (size_t i = 0; i < num_samples; i++) {
+        dst[2 * i]     = src[i];
+        dst[2 * i + 1] = src[i];
+    }
+}
+
 /* ------------------------------------------------------------------------
  * One playback session: send header, receive chunks until the 0-length
  * end marker, feed each into i2s_spk, ACK each, track telemetry.
@@ -190,7 +229,7 @@ static void run_playback_session(void)
         .magic = AUDIO_MAGIC,
         .sample_rate = SAMPLE_RATE,
         .bits_per_sample = BITS_PER_SAMPLE,
-        .channel_count = CHANNEL_COUNT,
+        .channel_count = WIRE_CHANNEL_COUNT,
     };
 
     /* Disable logging before the header/PCM stream starts — any log line
@@ -250,11 +289,17 @@ static void run_playback_session(void)
             }
         }
 
+        /* Upmix the received mono chunk into interleaved stereo (L=R) —
+         * see upmix_mono_to_stereo()'s comment for why i2s_spk is
+         * configured STEREO here even though the source audio is mono. */
+        upmix_mono_to_stereo(s_chunk_buf, chunk_len, s_stereo_buf);
+        size_t stereo_len = chunk_len * 2;
+
         size_t sent = 0;
-        while (sent < chunk_len) {
+        while (sent < stereo_len) {
             size_t this_sent = 0;
-            esp_err_t ret = i2s_spk_send_buffer(s_chunk_buf + sent, chunk_len - sent, &this_sent);
-            if (this_sent < chunk_len - sent) {
+            esp_err_t ret = i2s_spk_send_buffer(s_stereo_buf + sent, stereo_len - sent, &this_sent);
+            if (this_sent < stereo_len - sent) {
                 s_short_write_count++;
             }
             if (ret != ESP_OK && ret != ESP_ERR_TIMEOUT) {
@@ -271,6 +316,10 @@ static void run_playback_session(void)
         }
         s_chunks_played++;
 
+        /* Duration is computed from the ORIGINAL mono chunk_len (the wire
+         * format), not the expanded stereo_len — the number of audio
+         * frames actually played per second is unaffected by upmixing;
+         * only the bytes-per-frame at the DAC changed. */
         prev_chunk_duration_us = ((uint64_t)chunk_len / BYTES_PER_FRAME) * 1000000ULL / SAMPLE_RATE;
         have_prev_chunk = true;
 
@@ -331,8 +380,8 @@ void app_main(void)
     i2s_spk_config_t cfg = {
         .sample_rate = SAMPLE_RATE,
         .bits_per_sample = BITS_PER_SAMPLE,
-        .channel_count = CHANNEL_COUNT,
-        .slot_mode = I2S_SLOT_MODE_MONO,
+        .channel_count = SPK_CHANNEL_COUNT,
+        .slot_mode = I2S_SLOT_MODE_STEREO,   /* see upmix_mono_to_stereo()'s comment for why */
         .gpio_bck = GPIO_BCK,
         .gpio_ws = GPIO_WS,
         .gpio_data = GPIO_DATA,

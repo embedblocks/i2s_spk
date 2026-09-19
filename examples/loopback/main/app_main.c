@@ -296,6 +296,32 @@ static void run_record_phase(void)
  * Playback phase
  * ---------------------------------------------------------------------- */
 
+/* Duplicate each mono 16-bit sample into both L and R slots of an
+ * interleaved stereo buffer.
+ *
+ * Why this exists: playing back through i2s_spk configured for MONO was
+ * found to produce audio on only ONE physical DAC/amp output channel on
+ * classic ESP32 (the other stayed silent); the same configuration plays
+ * correctly on both channels on ESP32-C3. This is a real difference in
+ * how the two chips' I2S TX hardware handles a MONO slot_mode request,
+ * not a bug in i2s_spk — it's the TX-side counterpart to the RX-side mono
+ * ambiguity i2s_mic's own examples already document and work around (see
+ * the KEEP_SLOT/stereo-capture comment at the top of this file). Since
+ * this example targets both chip families from one shared source file,
+ * it sidesteps the ambiguity the same way: request STEREO explicitly and
+ * put the same sample in both slots, rather than depend on which chips
+ * currently happen to handle MONO correctly. */
+static void upmix_mono_to_stereo(const uint8_t *mono_bytes, size_t mono_len, uint8_t *stereo_bytes)
+{
+    const int16_t *src = (const int16_t *)mono_bytes;
+    int16_t *dst = (int16_t *)stereo_bytes;
+    size_t num_samples = mono_len / sizeof(int16_t);
+    for (size_t i = 0; i < num_samples; i++) {
+        dst[2 * i]     = src[i];
+        dst[2 * i + 1] = src[i];
+    }
+}
+
 static void run_playback_phase(void)
 {
     ESP_LOGI(TAG, "Playing back...");
@@ -303,8 +329,8 @@ static void run_playback_phase(void)
     i2s_spk_config_t spk_cfg = {
         .sample_rate = SAMPLE_RATE,
         .bits_per_sample = 16,
-        .channel_count = 1,
-        .slot_mode = I2S_SLOT_MODE_MONO,
+        .channel_count = 2,
+        .slot_mode = I2S_SLOT_MODE_STEREO,   /* see upmix_mono_to_stereo()'s comment for why */
         .gpio_bck = CONFIG_LOOPBACK_SPK_GPIO_BCK,
         .gpio_ws = CONFIG_LOOPBACK_SPK_GPIO_WS,
         .gpio_data = CONFIG_LOOPBACK_SPK_GPIO_DATA,
@@ -324,16 +350,24 @@ static void run_playback_phase(void)
     size_t total_bytes = s_record_write_pos * sizeof(int16_t);
     size_t offset = 0;
 
+    /* Upmixed one SPK_CHUNK_BYTES window at a time, rather than doubling
+     * the whole recording buffer up front — keeps the extra RAM cost
+     * fixed and small regardless of CONFIG_LOOPBACK_RECORD_SECONDS. */
+    static uint8_t s_stereo_chunk_buf[SPK_CHUNK_BYTES * 2];
+
     while (offset < total_bytes) {
         size_t want = total_bytes - offset;
         if (want > SPK_CHUNK_BYTES) {
             want = SPK_CHUNK_BYTES;
         }
 
+        upmix_mono_to_stereo(pcm_bytes + offset, want, s_stereo_chunk_buf);
+        size_t stereo_len = want * 2;
+
         size_t sent = 0;
-        while (sent < want) {
+        while (sent < stereo_len) {
             size_t this_sent = 0;
-            esp_err_t ret = i2s_spk_send_buffer(pcm_bytes + offset + sent, want - sent, &this_sent);
+            esp_err_t ret = i2s_spk_send_buffer(s_stereo_chunk_buf + sent, stereo_len - sent, &this_sent);
             if (ret != ESP_OK && ret != ESP_ERR_TIMEOUT) {
                 ESP_LOGE(TAG, "i2s_spk_send_buffer failed: %s", esp_err_to_name(ret));
                 offset = total_bytes;   /* stop the outer loop too */
