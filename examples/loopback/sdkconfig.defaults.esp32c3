@@ -1,0 +1,20 @@
+# ESP32-C3 GPIO defaults for the loopback example, matching the pins
+# already used and confirmed working in i2s_mic's and i2s_spk's own
+# individual streaming examples.
+#
+# ESP-IDF automatically merges this on top of sdkconfig.defaults whenever
+# you `idf.py set-target esp32c3` — building for esp32/esp32s3/etc. is
+# unaffected.
+
+CONFIG_LOOPBACK_MIC_GPIO_BCK=7
+CONFIG_LOOPBACK_MIC_GPIO_WS=8
+CONFIG_LOOPBACK_MIC_GPIO_DATA=9
+
+CONFIG_LOOPBACK_SPK_GPIO_BCK=4
+CONFIG_LOOPBACK_SPK_GPIO_WS=5
+CONFIG_LOOPBACK_SPK_GPIO_DATA=6
+
+# Keep console output visible over the native USB-Serial-JTAG cable on
+# boards with no separate UART bridge chip (ESP-IDF's own default for this
+# target already — pinned here explicitly).
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y

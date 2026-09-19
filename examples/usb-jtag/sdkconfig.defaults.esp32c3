@@ -1,0 +1,26 @@
+# ESP32-C3-specific defaults for this example.
+#
+# ESP-IDF automatically merges sdkconfig.defaults.<target> on top of
+# sdkconfig.defaults whenever you `idf.py set-target esp32c3`, so anything
+# here only applies to C3 builds — building for esp32s3/esp32c6/etc. is
+# unaffected.
+#
+# NONE of these are required for the PC -> ESP -> i2s_spk data path itself
+# to work: that path uses the usb_serial_jtag driver's own read/write API
+# directly (see host_comm_init() in main/app_main.c), which is independent
+# of whichever peripheral the console uses. This file exists purely to pin
+# down console *visibility* on ESP32-C3 boards that have no separate
+# USB-to-UART bridge chip (i.e. the cable you flash/monitor through is the
+# chip's native USB-Serial-JTAG peripheral, not a real UART0 wired to
+# anything).
+#
+# If your specific C3 board *does* have a separate bridge chip (a second,
+# distinct COM port appears when you plug in), use the sibling
+# `examples/uart-bridge` example instead — this one assumes a native
+# USB-Serial-JTAG peripheral is what you're flashing through.
+
+# Keep ESP_LOGx / printf output visible over the native USB-Serial-JTAG
+# cable. This is ESP-IDF's own default for the esp32c3 target already —
+# pinned here explicitly so it doesn't silently depend on a value someone
+# else's global sdkconfig.defaults might change.
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y

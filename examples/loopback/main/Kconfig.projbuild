@@ -1,0 +1,43 @@
+menu "i2s_mic + i2s_spk loopback example"
+
+    config LOOPBACK_MIC_GPIO_BCK
+        int "Microphone I2S BCK (SCK) GPIO"
+        default 7
+        help
+            Per-target defaults are set in sdkconfig.defaults.esp32 and
+            sdkconfig.defaults.esp32c3 — override here only if your wiring
+            differs from this example's README.
+
+    config LOOPBACK_MIC_GPIO_WS
+        int "Microphone I2S WS GPIO"
+        default 8
+
+    config LOOPBACK_MIC_GPIO_DATA
+        int "Microphone I2S SD (data) GPIO"
+        default 9
+
+    config LOOPBACK_SPK_GPIO_BCK
+        int "Speaker I2S BCK GPIO"
+        default 4
+
+    config LOOPBACK_SPK_GPIO_WS
+        int "Speaker I2S WS (LRC) GPIO"
+        default 5
+
+    config LOOPBACK_SPK_GPIO_DATA
+        int "Speaker I2S DIN GPIO"
+        default 6
+
+    config LOOPBACK_RECORD_SECONDS
+        int "Recording duration per loopback cycle (seconds)"
+        default 2
+        range 1 8
+        help
+            How long to record before switching to playback. The whole
+            recording is held in RAM at 16 kHz / 16-bit / mono (2 bytes per
+            sample), so this directly sets the RAM budget:
+            RECORD_SECONDS * 32000 bytes. Keep this modest on
+            single-I2S-peripheral, smaller-RAM chips (e.g. ESP32-C3) — see
+            this example's README for the exact math.
+
+endmenu

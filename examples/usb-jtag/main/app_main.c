@@ -1,0 +1,358 @@
+/*
+ * i2s_spk streaming example — PC (WAV file) -> USB-Serial-JTAG -> ESP32-C3
+ *                              -> i2s_spk -> MAX98357A -> speaker
+ *
+ * FOR ESP32-C3, ESP32-S3, ESP32-C6, AND OTHER BOARDS WITH A NATIVE
+ * USB-Serial-JTAG PERIPHERAL AND NO SEPARATE UART BRIDGE CHIP — the single
+ * USB cable you already flash/monitor through is used for the audio
+ * stream too. No extra hardware needed.
+ *
+ * If your board instead has a separate CP2102/CH340-style bridge chip (a
+ * second, distinct COM port appears when you plug in — true of most
+ * classic ESP32 devkits), use the sibling example
+ * `i2s_spk_uart_bridge_example` instead.
+ *
+ * ============================================================================
+ * WHY THIS EXAMPLE USES A CHUNK/ACK PROTOCOL INSTEAD OF "JUST STREAM IT"
+ * ============================================================================
+ * i2s_mic's examples stream continuously: the ESP is the sender, the PC's
+ * job is just to keep up, and if it briefly can't, the OS's own socket/
+ * serial receive buffers absorb the jitter. That pattern does NOT carry
+ * over here, because the direction of the bottleneck is reversed:
+ *
+ *   - Here, the PC is the SENDER, and the ESP is the RECEIVER.
+ *   - The ESP's *consumption* rate is fixed by the audio sample rate
+ *     (i2s_spk_send_buffer() only accepts data as fast as TX DMA actually
+ *     drains it, i.e. in real time) — it cannot speed up to match however
+ *     fast the PC feels like writing to the serial port.
+ *   - A PC-side script has no natural reason to pace itself to real time
+ *     on its own: file reads and serial writes both look "instant" from
+ *     Python's perspective compared to 16 kHz audio. Without an explicit
+ *     pacing mechanism, the PC would blast the whole WAV file at
+ *     USB-CDC/UART speed (hundreds of KB/s to several MB/s), vastly faster
+ *     than the ~32 KB/s the speaker can actually consume, and overflow
+ *     whatever's on the receiving end — the USB-Serial-JTAG driver's own
+ *     RX ring buffer here.
+ *
+ * Three ways to fix this were considered (see the design document's
+ * Section 10.1, which calls this out as an example-level tuning concern):
+ *
+ *   1. Hardware RTS/CTS flow control — not available here. A native
+ *      USB-Serial-JTAG endpoint is a USB-CDC device, not a real UART with
+ *      RTS/CTS lines, so there is nothing to wire up even in principle.
+ *   2. Keep the audio bitrate well under the transport's raw capacity and
+ *      rely on generous on-chip buffering to absorb jitter — this only
+ *      helps with *transient* bursts. It does not fix the actual problem
+ *      here, which isn't a brief burst but a sustained rate mismatch: an
+ *      unpaced sender will eventually fill any finite buffer no matter how
+ *      large, because it is not slowing down to match a fixed real-time
+ *      consumer.
+ *   3. An application-level ACK/credit protocol, where the PC sends one
+ *      bounded chunk and then WAITS for the ESP to acknowledge it before
+ *      sending the next — chosen here. Each ACK is only sent after the
+ *      chunk has actually been handed to i2s_spk_send_buffer() (a blocking
+ *      call paced by real playback time — see i2s_spk.h), so the PC's
+ *      send rate is tied directly to the ESP's real consumption rate,
+ *      automatically, with no separate timer or rate limiter needed on
+ *      either end. This is transport-agnostic and works identically for
+ *      both this example and the UART-bridge one.
+ *
+ * The wire format (sync bytes, magic, header layout, and the chunk/length-
+ * prefix/ACK protocol) is defined and owned entirely by this example, not
+ * by the i2s_spk component. i2s_spk knows nothing about USB, UART,
+ * headers, or byte order — see the design document's Section 10
+ * ("component boundary" discussion) for why that split exists.
+ *
+ * Wiring (MAX98357A I2S class-D amp — adjust GPIO_BCK/GPIO_WS/GPIO_DATA
+ * below for your board):
+ *   MAX98357A BCLK -> ESP32 GPIO_BCK
+ *   MAX98357A LRC  -> ESP32 GPIO_WS
+ *   MAX98357A DIN  -> ESP32 GPIO_DATA
+ *   MAX98357A GAIN -> leave floating (default 9 dB) or see its datasheet
+ *   MAX98357A SD   -> leave floating (selects (L+R)/2 mono mixdown — this
+ *                     example sends true mono, so this is the setting to
+ *                     use; tying it to GND disables the amp entirely, and
+ *                     tying it to VDD selects right-channel-only, which
+ *                     would play silence against a mono source)
+ *   MAX98357A VIN  -> 5V (or 3.3V; the amp works at either, with less
+ *                     output power at 3.3V)
+ *   MAX98357A GND  -> GND
+ *
+ * A PCM5102 or UDA1334A I2S DAC into a headphone jack should work
+ * identically in place of the MAX98357A — i2s_spk only speaks standard
+ * Philips-format I2S and has no part-specific logic, same as i2s_mic.
+ */
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include <inttypes.h>
+
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "driver/usb_serial_jtag.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include "i2s_spk.h"
+
+#define TAG            "SPK_JTAG"
+
+/* ---- Audio / I2S configuration ----------------------------------------
+ * True mono, 16-bit, 16 kHz. Unlike i2s_mic's RX examples, there is no
+ * documented mono-mode TX interleaving bug motivating a stereo workaround
+ * here — that issue was specific to the RX path (see i2s_mic's README).
+ * The PC-side script converts/resamples the source WAV to exactly this
+ * format before sending; see spk_audio_send.py. */
+#define SAMPLE_RATE       16000
+#define BITS_PER_SAMPLE   16
+#define CHANNEL_COUNT     1
+#define BYTES_PER_FRAME   (CHANNEL_COUNT * (BITS_PER_SAMPLE / 8))
+
+#define GPIO_BCK          4
+#define GPIO_WS           3
+#define GPIO_DATA         2
+
+#define DMA_BUFFER_COUNT  6
+#define DMA_BUFFER_SIZE   2048   /* bytes; independent of CHUNK_BYTES below —
+                                   * see i2s_spk.h's note that send_buffer()
+                                   * callers aren't required to match this. */
+
+/* ---- Wire protocol ------------------------------------------------------
+ * Handshake: PC waits for READY, sends TRIGGER_BYTE (validated in a loop,
+ * not accepted as the first byte received — see host_comm_init() below),
+ * ESP replies with audio_header_t once. Then a chunked, ACK-paced PCM
+ * stream: PC sends a 4-byte little-endian chunk length followed by that
+ * many raw PCM bytes, waits for a single ACK_BYTE from the ESP, and
+ * repeats. A chunk length of 0 marks end-of-stream (no ACK follows it);
+ * after that the ESP goes back to waiting for the next TRIGGER_BYTE, so
+ * the PC script can be re-run to play another file without resetting the
+ * board. */
+#define TRIGGER_BYTE      0xA5
+#define ACK_BYTE          0x06   /* ASCII ACK */
+#define AUDIO_MAGIC       0xC0FFEE02u
+#define CHUNK_BYTES       4096   /* max PCM payload per chunk; must match
+                                   * CHUNK_BYTES in spk_audio_send.py */
+
+typedef struct {
+    uint8_t  sync[3];          /* 0xAA 0xAA 0xAA */
+    uint32_t magic;            /* AUDIO_MAGIC */
+    uint32_t sample_rate;
+    uint16_t bits_per_sample;
+    uint8_t  channel_count;
+} __attribute__((packed)) audio_header_t;
+
+static uint8_t s_chunk_buf[CHUNK_BYTES];
+
+/* ---- Best-effort telemetry (see i2s_spk's README, "On underrun/overrun
+ * tracking", for why these live here at the application layer rather than
+ * inside the component). Logged once per completed playback session,
+ * since logging is disabled for the duration of the binary stream itself
+ * (see the comment in host_comm_init()). */
+static uint32_t s_short_write_count;
+static uint32_t s_underrun_estimate_count;
+static uint32_t s_chunks_played;
+
+/* ------------------------------------------------------------------------
+ * Transport helpers (USB-Serial-JTAG)
+ * ---------------------------------------------------------------------- */
+
+static void read_exact(uint8_t *dst, size_t len)
+{
+    size_t got = 0;
+    while (got < len) {
+        int n = usb_serial_jtag_read_bytes(dst + got, len - got, portMAX_DELAY);
+        if (n > 0) {
+            got += (size_t)n;
+        }
+    }
+}
+
+static void write_exact(const uint8_t *src, size_t len)
+{
+    size_t sent = 0;
+    while (sent < len) {
+        int n = usb_serial_jtag_write_bytes(src + sent, len - sent, portMAX_DELAY);
+        if (n > 0) {
+            sent += (size_t)n;
+        }
+    }
+}
+
+/* ------------------------------------------------------------------------
+ * One playback session: send header, receive chunks until the 0-length
+ * end marker, feed each into i2s_spk, ACK each, track telemetry.
+ * ---------------------------------------------------------------------- */
+
+static void run_playback_session(void)
+{
+    audio_header_t hdr = {
+        .sync = {0xAA, 0xAA, 0xAA},
+        .magic = AUDIO_MAGIC,
+        .sample_rate = SAMPLE_RATE,
+        .bits_per_sample = BITS_PER_SAMPLE,
+        .channel_count = CHANNEL_COUNT,
+    };
+
+    /* Disable logging before the header/PCM stream starts — any log line
+     * emitted while the binary protocol is running would land inside it
+     * and desync the PC script's parser, exactly as in i2s_mic's examples.
+     * Restored once this session's 0-length end marker is seen, below. */
+    esp_log_level_set("*", ESP_LOG_NONE);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    write_exact((const uint8_t *)&hdr, sizeof(hdr));
+
+    s_short_write_count = 0;
+    s_underrun_estimate_count = 0;
+    s_chunks_played = 0;
+
+    uint64_t prev_chunk_duration_us = 0;
+    bool have_prev_chunk = false;
+
+    while (1) {
+        uint64_t wait_start_us = esp_timer_get_time();
+
+        uint8_t len_bytes[4];
+        read_exact(len_bytes, sizeof(len_bytes));
+        uint32_t chunk_len = (uint32_t)len_bytes[0]
+                            | ((uint32_t)len_bytes[1] << 8)
+                            | ((uint32_t)len_bytes[2] << 16)
+                            | ((uint32_t)len_bytes[3] << 24);
+
+        if (chunk_len == 0) {
+            break;   /* end-of-stream marker; no ACK follows it */
+        }
+
+        /* Defensive bound: the PC script is written to never exceed
+         * CHUNK_BYTES, but a corrupted/desynced length prefix could claim
+         * otherwise. Refusing to read more than our buffer holds avoids an
+         * out-of-bounds write; the session is aborted rather than guessing
+         * at a recovery. */
+        if (chunk_len > CHUNK_BYTES) {
+            esp_log_level_set("*", ESP_LOG_WARN);
+            ESP_LOGE(TAG, "chunk_len %" PRIu32 " exceeds CHUNK_BYTES (%d) — aborting session",
+                     chunk_len, CHUNK_BYTES);
+            return;
+        }
+
+        read_exact(s_chunk_buf, chunk_len);
+        uint64_t data_ready_us = esp_timer_get_time();
+
+        /* Underrun heuristic: if it took longer to receive this chunk than
+         * the previous chunk's own audio takes to play, the TX DMA likely
+         * ran dry and auto_clear inserted silence before this data
+         * arrived. This is an estimate, not a driver-confirmed event — see
+         * i2s_spk's README for why no confirmed signal exists. */
+        if (have_prev_chunk) {
+            uint64_t idle_gap_us = data_ready_us - wait_start_us;
+            if (idle_gap_us > prev_chunk_duration_us) {
+                s_underrun_estimate_count++;
+            }
+        }
+
+        size_t sent = 0;
+        while (sent < chunk_len) {
+            size_t this_sent = 0;
+            esp_err_t ret = i2s_spk_send_buffer(s_chunk_buf + sent, chunk_len - sent, &this_sent);
+            if (this_sent < chunk_len - sent) {
+                s_short_write_count++;
+            }
+            if (ret != ESP_OK && ret != ESP_ERR_TIMEOUT) {
+                esp_log_level_set("*", ESP_LOG_WARN);
+                ESP_LOGE(TAG, "i2s_spk_send_buffer failed: %s", esp_err_to_name(ret));
+                return;
+            }
+            sent += this_sent;
+            if (this_sent == 0) {
+                /* No progress at all this call (e.g. component not
+                 * RUNNING) — avoid spinning forever. */
+                break;
+            }
+        }
+        s_chunks_played++;
+
+        prev_chunk_duration_us = ((uint64_t)chunk_len / BYTES_PER_FRAME) * 1000000ULL / SAMPLE_RATE;
+        have_prev_chunk = true;
+
+        uint8_t ack = ACK_BYTE;
+        write_exact(&ack, 1);
+    }
+
+    esp_log_level_set("*", ESP_LOG_INFO);
+    ESP_LOGI(TAG, "playback session complete: %" PRIu32 " chunks, "
+             "%" PRIu32 " short writes, %" PRIu32 " estimated underruns",
+             s_chunks_played, s_short_write_count, s_underrun_estimate_count);
+}
+
+/* ------------------------------------------------------------------------
+ * Host handshake over USB-Serial-JTAG
+ * ---------------------------------------------------------------------- */
+
+static void host_comm_init(void)
+{
+    usb_serial_jtag_driver_config_t usb_cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    usb_cfg.rx_buffer_size = 4096;
+    usb_cfg.tx_buffer_size = 256;
+    ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&usb_cfg));
+
+    /* Note: this only installs the driver for our own reads/writes. The
+     * console's log output keeps working over the same physical
+     * USB-Serial-JTAG cable via ESP-IDF's separate, lower-level console
+     * output path — the two coexist by design, same as in i2s_mic's
+     * examples. We still explicitly silence logging during the binary
+     * protocol itself (see run_playback_session()) out of the same
+     * caution i2s_mic's examples apply. */
+}
+
+static void wait_for_trigger(void)
+{
+    ESP_LOGI(TAG, "=== READY, waiting for trigger ===");
+    fflush(stdout);
+
+    /* Validated in a loop against a specific expected value, not accepted
+     * as the first byte received — a floating/noisy line, or a stray byte
+     * left over from a previous session, could otherwise desync the
+     * one-shot header that follows. */
+    uint8_t trigger = 0;
+    do {
+        read_exact(&trigger, 1);
+    } while (trigger != TRIGGER_BYTE);
+
+    ESP_LOGI(TAG, "Trigger 0x%02X received", trigger);
+    fflush(stdout);
+}
+
+/* ------------------------------------------------------------------------
+ * Entry point
+ * ---------------------------------------------------------------------- */
+
+void app_main(void)
+{
+    i2s_spk_config_t cfg = {
+        .sample_rate = SAMPLE_RATE,
+        .bits_per_sample = BITS_PER_SAMPLE,
+        .channel_count = CHANNEL_COUNT,
+        .slot_mode = I2S_SLOT_MODE_MONO,
+        .gpio_bck = GPIO_BCK,
+        .gpio_ws = GPIO_WS,
+        .gpio_data = GPIO_DATA,
+        .port = I2S_NUM_0,
+        .dma_buffer_count = DMA_BUFFER_COUNT,
+        .dma_buffer_size = DMA_BUFFER_SIZE,
+        .write_timeout = portMAX_DELAY,   /* block until accepted — this is
+                                            * what makes send_buffer() the
+                                            * real-time pacing reference the
+                                            * ACK protocol relies on. */
+        .user_ctx = NULL,
+    };
+
+    ESP_ERROR_CHECK(i2s_spk_init(&cfg));
+    ESP_ERROR_CHECK(i2s_spk_start());
+
+    host_comm_init();
+
+    while (1) {
+        wait_for_trigger();
+        run_playback_session();
+    }
+}

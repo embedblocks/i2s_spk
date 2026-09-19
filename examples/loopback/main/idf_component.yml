@@ -1,0 +1,27 @@
+## This is the "main" component's own manifest. It declares a dependency on
+## i2s_mic from the ESP Component Registry — i2s_spk itself is NOT listed
+## here because this example lives inside the i2s_spk repository and is
+## built against the local checkout via EXTRA_COMPONENT_DIRS in the
+## top-level CMakeLists.txt, not fetched from the registry.
+##
+## The companion example inside the i2s_mic repository
+## (examples/loopback/main/idf_component.yml) is the mirror image: it
+## depends on embedblocks/i2s_spk here instead, and vendors i2s_mic locally.
+
+dependencies:
+  idf: ">=6.0,<6.1"
+  embedblocks/i2s_mic: "^0.1.3"
+
+  ## Until embedblocks/i2s_mic is actually published to the ESP Component
+  ## Registry at this version, the line above may not resolve. Until then,
+  ## override it to build against a local checkout instead by replacing
+  ## the line above with:
+  ##
+  ##   embedblocks/i2s_mic:
+  ##     version: "*"
+  ##     override_path: "../../../i2s_mic"
+  ##
+  ## (path relative to this file — adjust to wherever you cloned i2s_mic;
+  ## the example above assumes i2s_mic and i2s_spk are checked out as
+  ## sibling directories). Switch back to the plain version-constrained
+  ## form once you've confirmed the published version matches.

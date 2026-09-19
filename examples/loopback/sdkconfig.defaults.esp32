@@ -1,0 +1,13 @@
+# Classic ESP32 GPIO defaults for the loopback example.
+#
+# Chosen to avoid UART0 (GPIO1/GPIO3) and the usual SPI-flash pin range
+# (GPIO6-11 on most modules). Adjust if your board uses these pins for
+# something else.
+
+CONFIG_LOOPBACK_MIC_GPIO_BCK=14
+CONFIG_LOOPBACK_MIC_GPIO_WS=15
+CONFIG_LOOPBACK_MIC_GPIO_DATA=32
+
+CONFIG_LOOPBACK_SPK_GPIO_BCK=25
+CONFIG_LOOPBACK_SPK_GPIO_WS=26
+CONFIG_LOOPBACK_SPK_GPIO_DATA=27

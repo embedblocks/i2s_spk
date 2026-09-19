@@ -1,0 +1,15 @@
+version: "0.1.0"
+description: >
+  Task-free I2S speaker (audio sink) component for ESP-IDF v6.0.x, built
+  on the modern i2s_std driver. Application calls a blocking
+  i2s_spk_send_buffer() to hand off pre-filled audio buffers; there is no
+  internal FreeRTOS task and no TX-side application callback — the
+  blocking call's return is the sole completion signal.
+url: "https://github.com/embedblocks/i2s_spk.git"
+dependencies:
+  idf: ">=6.0,<6.1"
+targets:
+  - esp32
+  - esp32s3
+  - esp32c3
+  - esp32c6
