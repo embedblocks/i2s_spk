@@ -1,4 +1,4 @@
-version: "0.1.1"
+version: "0.1.2"
 description: >
   Task-free I2S speaker (audio sink) component for ESP-IDF v6.0.x, built
   on the modern i2s_std driver. Application calls a blocking
