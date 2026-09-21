@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.2]
+### Fixed
+- Missing esp_timer REQUIRES added in examples
+### Added
+- Loopback dual i2s  example added for devices having multiple i2s devices e.g esp32 and not esp32c3
+
 ## [0.1.1]
 
 ### Fixed
