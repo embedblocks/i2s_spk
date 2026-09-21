@@ -1,0 +1,2 @@
+dependencies:
+  embedblocks/i2s_mic: "^0.1.3"

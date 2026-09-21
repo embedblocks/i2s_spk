@@ -1,0 +1,33 @@
+menu "i2s_mic + i2s_spk live loopback example (dual I2S peripheral)"
+
+    config LOOPBACK_MIC_GPIO_BCK
+        int "Microphone I2S BCK (SCK) GPIO"
+        default 14
+        help
+            Per-target defaults are set in sdkconfig.defaults.esp32 and
+            sdkconfig.defaults.esp32s3 — override here only if your wiring
+            differs from this example's README. (This example does not
+            target ESP32-C3/C6 at all — see the README for why — so no
+            sdkconfig.defaults.esp32c3 is provided here.)
+
+    config LOOPBACK_MIC_GPIO_WS
+        int "Microphone I2S WS GPIO"
+        default 15
+
+    config LOOPBACK_MIC_GPIO_DATA
+        int "Microphone I2S SD (data) GPIO"
+        default 32
+
+    config LOOPBACK_SPK_GPIO_BCK
+        int "Speaker I2S BCK GPIO"
+        default 25
+
+    config LOOPBACK_SPK_GPIO_WS
+        int "Speaker I2S WS (LRC) GPIO"
+        default 26
+
+    config LOOPBACK_SPK_GPIO_DATA
+        int "Speaker I2S DIN GPIO"
+        default 27
+
+endmenu

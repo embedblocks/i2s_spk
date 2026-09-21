@@ -1,0 +1,17 @@
+# ESP32-S3 GPIO defaults for the dual-I2S live loopback example.
+#
+# Chosen to avoid strapping pins (0, 3, 45, 46), the native USB D+/D- pins
+# (19, 20), and the octal PSRAM/flash pin range used by N16R8-style boards
+# (roughly GPIO26-32). Adjust if your specific S3 board uses these pins for
+# something else.
+#
+# ESP-IDF automatically merges this on top of sdkconfig.defaults whenever
+# you `idf.py set-target esp32s3` — building for esp32/etc. is unaffected.
+
+CONFIG_LOOPBACK_MIC_GPIO_BCK=4
+CONFIG_LOOPBACK_MIC_GPIO_WS=5
+CONFIG_LOOPBACK_MIC_GPIO_DATA=6
+
+CONFIG_LOOPBACK_SPK_GPIO_BCK=15
+CONFIG_LOOPBACK_SPK_GPIO_WS=16
+CONFIG_LOOPBACK_SPK_GPIO_DATA=17

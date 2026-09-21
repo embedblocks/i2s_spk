@@ -1,0 +1,14 @@
+# Classic ESP32 GPIO defaults for the dual-I2S live loopback example.
+#
+# Chosen to avoid UART0 (GPIO1/GPIO3) and the usual SPI-flash pin range
+# (GPIO6-11 on most modules). Same values as the sibling
+# examples/loopback-esp32c3 example's ESP32 defaults, for consistency if
+# you're wiring both up on the same board.
+
+CONFIG_LOOPBACK_MIC_GPIO_BCK=16
+CONFIG_LOOPBACK_MIC_GPIO_WS=17
+CONFIG_LOOPBACK_MIC_GPIO_DATA=18
+
+CONFIG_LOOPBACK_SPK_GPIO_BCK=19
+CONFIG_LOOPBACK_SPK_GPIO_WS=22
+CONFIG_LOOPBACK_SPK_GPIO_DATA=23
