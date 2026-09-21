@@ -90,14 +90,14 @@ Limitations.
 ## Installation
 
 ```bash
-idf.py add-dependency "embedblocks/i2s_spk^0.1.1"
+idf.py add-dependency "embedblocks/i2s_spk^0.1.2"
 ```
 
 Or in `idf_component.yml`:
 
 ```yaml
 dependencies:
-  embedblocks/i2s_spk: "^0.1.1"
+  embedblocks/i2s_spk: "^0.1.2"
 ```
 
 ---
