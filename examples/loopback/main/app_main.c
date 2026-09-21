@@ -111,7 +111,7 @@
 #define KEEP_SLOT             0
 
 #define NUM_BUFS        4
-#define BUF_FRAMES      512    /* stereo frames per DMA buffer */
+#define BUF_FRAMES      480    /* stereo frames per DMA buffer */
 #define BUF_BYTES       (BUF_FRAMES * MIC_CHANNEL_COUNT * (MIC_BITS_PER_SAMPLE / 8))
 
 /* ---- Recording buffer (RAM, 16-bit mono, post-conversion) ------------- */
@@ -263,7 +263,7 @@ static void run_record_phase(void)
         .gpio_ws = CONFIG_LOOPBACK_MIC_GPIO_WS,
         .gpio_data = CONFIG_LOOPBACK_MIC_GPIO_DATA,
         .port = I2S_NUM_0,
-        .dma_buffer_count = 6,
+        .dma_buffer_count = 10,
         .dma_buffer_size = BUF_BYTES,
         .max_pending_buffers = NUM_BUFS,
         .cb = mic_ready_cb,
