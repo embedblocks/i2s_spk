@@ -1,11 +1,14 @@
-version: "0.1.2"
+version: "0.1.3"
 description: >
   Task-free I2S speaker (audio sink) component for ESP-IDF v6.0.x, built
   on the modern i2s_std driver. Application calls a blocking
   i2s_spk_send_buffer() to hand off pre-filled audio buffers; there is no
   internal FreeRTOS task and no TX-side application callback — the
-  blocking call's return is the sole completion signal.
-url: "https://github.com/embedblocks/i2s_spk.git"
+  blocking call's return is the sole completion signal. Drives I2S DAC
+  modules such as the PCM5102A (GY-PCM5102).
+url: "https://github.com/embedblocks/i2s_spk"
+repository: "https://github.com/embedblocks/i2s_spk.git"
+license: "MIT"
 dependencies:
   idf: ">=6.0,<6.1"
 targets:
@@ -15,16 +18,21 @@ targets:
   - esp32c6
 
 tags:
-  - speaker
   - i2s
+  - speaker
   - i2s_speaker
-  
+  - audio
+  - audio-output
+  - playback
+  - dac
+  - pcm5102
+  - pcm5102a
+  - gy-pcm5102
 
 files:
-   use_gitignore: true
-   exclude:
-      - ".git/**/*"
-      - "docs/**/*"
-      - "dist/**/*"
-      - "examples/loopback/**/*"
-      
+  use_gitignore: true
+  exclude:
+    - ".git/**/*"
+    - "docs/**/*"
+    - "dist/**/*"
+    - "examples/loopback/**/*"
