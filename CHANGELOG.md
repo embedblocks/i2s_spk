@@ -5,6 +5,37 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+
+
+
+
+## [0.1.3] - 2026-10-02
+
+The component's code and API are unchanged; this release updates an
+example and the registry metadata.
+
+### Changed
+- `examples/loopback-dual-i2s`: ported to i2s_mic 0.2.0, which replaced
+  its ISR callback API with a blocking `i2s_mic_read()`. The example now
+  uses a single relay task: read one 30 ms microphone buffer, convert it,
+  and pass it to `i2s_spk_send_buffer()`. The microphone-side ISR
+  callback, buffer queues and re-post logic are removed. The example now
+  requires `embedblocks/i2s_mic` `^0.2.0`.
+- `idf_component.yml`: added `repository`, `documentation`, `issues`,
+  `changelog` and `license` fields; `url` now points to the project page
+  instead of the Git URL; added search tags (`audio`, `audio-output`,
+  `playback`, `dac`, `pcm5102`, `pcm5102a`, `gy-pcm5102`); description
+  now names the PCM5102A (GY-PCM5102) DAC module.
+
+### Fixed
+- `examples/loopback-dual-i2s` README: replaced the unexplained
+  "dma_overflow climbs while audio is clean" note with its cause.
+  i2s_mic 0.1.x copied audio in the driver's `on_recv` callback but never
+  called `i2s_channel_read()`, so the driver's internal queue filled
+  after five buffers and reported an overflow on every buffer after
+  that. It was not audio loss and was not caused by the GPIO choice.
+
+
 ## [0.1.2]
 ### Fixed
 - Missing esp_timer REQUIRES added in examples
