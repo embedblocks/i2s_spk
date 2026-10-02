@@ -4,66 +4,44 @@
  * relays it straight to i2s_spk, continuously, in real time. No PC, no
  * RAM recording buffer, no repeated init/deinit cycling.
  *
- * This copy of the example lives inside the i2s_spk repository and pulls
- * in i2s_mic from the ESP Component Registry (see main/idf_component.yml).
- * An identical copy lives inside the i2s_mic repository
- * (examples/loopback-dual-i2s), pulling in i2s_spk from the registry
- * instead — the two are intentionally the same demo, cross-referenced
- * from both components' own example sets.
+ * The same example exists in both repositories: in i2s_spk it pulls
+ * i2s_mic from the ESP Component Registry, in i2s_mic it pulls i2s_spk
+ * from the registry (see main/idf_component.yml). The code is identical.
  *
  * ============================================================================
- * WHY THIS EXAMPLE EXISTS SEPARATELY FROM examples/loopback-esp32c3
+ * WHY THIS EXAMPLE EXISTS SEPARATELY FROM THE SINGLE-I2S LOOPBACK
  * ============================================================================
- * examples/loopback-esp32c3 (in both repositories) uses a record-then-
- * playback structure: capture N seconds into RAM, fully release i2s_mic,
- * initialize i2s_spk, play the RAM buffer back, fully release i2s_spk,
- * repeat. That structure exists ONLY because chips with a single I2S
- * peripheral (SOC_I2S_NUM == 1 — ESP32-C3, ESP32-C6) cannot have i2s_mic
- * and i2s_spk both INITIALIZED at the same time: each independently calls
- * ESP-IDF's i2s_new_channel(), which claims a physical I2S controller for
- * as long as the component stays INITIALIZED, not just while running — on
- * a single-controller chip, whichever initializes first gets the only
- * available controller and the other's init() call fails outright.
+ * The single-I2S loopback example (examples/loopback-esp32c3 in i2s_spk,
+ * examples/loopback_example in i2s_mic) records into RAM, releases
+ * i2s_mic, then plays back with i2s_spk. That structure exists only
+ * because chips with one I2S peripheral (ESP32-C3, ESP32-C6) cannot have
+ * both components initialized at once: each claims a physical I2S
+ * controller in i2s_new_channel() for as long as it stays initialized.
  *
- * ESP32 and ESP32-S3 don't have that constraint — they each have TWO
- * independent I2S peripherals. There is no reason to pay the cost of a RAM
- * buffer or repeated teardown/bringup on these chips, and doing so
- * anyway turned out to have its own real cost: testing showed the
- * loopback-esp32c3 structure's repeated i2s_mic_init()/deinit() cycling
- * produces a large, suspiciously constant number of DMA-level overflow
- * events on classic ESP32 (tens of drops, at a nearly identical count
- * every single cycle — consistent with a fixed cost around channel
- * bring-up/teardown rather than an ongoing throughput problem), which
- * i2s_mic's own single-init streaming examples do not exhibit at all. That
- * issue is still being tracked down on the loopback-esp32c3 side — see
- * this repository's other example's README — but it's avoided here
- * entirely, simply by never doing that init/deinit cycling in the first
- * place: this example initializes both components exactly ONCE, at boot,
- * and never tears either down again.
+ * ESP32 and ESP32-S3 have two I2S peripherals, so both components can be
+ * initialized once at boot and run side by side forever, with a genuinely
+ * live loopback.
  *
  * Structure:
- *   - i2s_mic on I2S_NUM_0, i2s_spk on I2S_NUM_1, both INITIALIZED and
- *     RUNNING simultaneously, for the entire lifetime of the program.
- *   - i2s_mic's ISR callback hands each captured buffer to a task, which
- *     converts it (32-bit stereo mic capture -> 16-bit mono -> upmixed
- *     16-bit stereo for the speaker — see the two comment blocks below for
- *     why each conversion exists) and immediately calls the blocking
- *     i2s_spk_send_buffer() on it, then returns the mic buffer to the pool.
- *   - No RAM recording buffer, no completion semaphore, no record/playback
- *     phase distinction — just a continuous relay loop paced by real
- *     playback time (i2s_spk_send_buffer() itself is the pacing, exactly
- *     as in i2s_spk's own streaming examples).
+ *   - i2s_mic on I2S_NUM_0, i2s_spk on I2S_NUM_1, both running for the
+ *     lifetime of the program.
+ *   - One relay task: i2s_mic_read() one DMA buffer (30 ms), convert it
+ *     (32-bit stereo capture -> 16-bit mono -> duplicated into 16-bit
+ *     stereo for the speaker), then the blocking i2s_spk_send_buffer().
+ *   - Playback paces the loop. While the speaker write blocks, new mic
+ *     buffers wait in the I2S driver's own queue (up to 5, about 150 ms),
+ *     so nothing is lost as long as the relay keeps up on average — which
+ *     it does, since both sides run from the same 16 kHz clock source.
  *
- * Expect a genuinely live loopback: roughly one relay-buffer's worth of
- * latency (a few tens of milliseconds, set by BUF_FRAMES below), not the
- * multi-second record/playback delay of loopback-esp32c3.
+ * Expect a live loopback with a small, constant delay: one capture buffer
+ * (30 ms) plus whatever the speaker's DMA buffers hold.
  *
  * ============================================================================
  * MIC CAPTURE: STEREO WORKAROUND AND SAMPLE EXTRACTION
  * ============================================================================
- * Reused verbatim from i2s_mic's own streaming examples: on at least one
- * tested ESP32-C3 / ESP-IDF combination, requesting I2S_SLOT_MODE_MONO for
- * RX did not produce a clean single-slot-per-frame stream, so this example
+ * Same approach as i2s_mic's own streaming examples: on at least one tested
+ * ESP32-C3 / ESP-IDF combination, requesting I2S_SLOT_MODE_MONO for RX did
+ * not produce a clean single-slot-per-frame stream, so this example
  * requests STEREO explicitly and discards the unwanted interleaved slot
  * (KEEP_SLOT below) while downconverting INMP441's 32-bit samples to
  * 16-bit. If your relayed audio comes out silent or hum-only, try flipping
@@ -72,15 +50,12 @@
  * ============================================================================
  * SPEAKER PLAYBACK: WHY STEREO, NOT MONO
  * ============================================================================
- * i2s_spk is configured STEREO here (with each mono sample duplicated into
- * both slots via upmix_mono_to_stereo()) rather than MONO, because
- * requesting MONO directly from i2s_spk was found, on classic ESP32, to
- * produce audio on only ONE physical DAC/amp output channel — a
- * chip-family difference in how ESP32's I2S TX hardware handles a MONO
- * slot request compared to ESP32-C3's, not a bug in i2s_spk itself (which
- * passes slot_mode straight through to the driver unchanged). See
- * i2s_spk's README, "Notes," for the full writeup. Since ESP32 is one of
- * this example's two supported targets, the fix is applied here too.
+ * i2s_spk is configured STEREO here, with each mono sample duplicated into
+ * both slots, rather than MONO: requesting MONO directly from i2s_spk was
+ * found, on classic ESP32, to produce audio on only ONE physical DAC/amp
+ * output channel — a chip-family difference in how ESP32's I2S TX hardware
+ * handles a MONO slot request, not a bug in i2s_spk. See i2s_spk's README,
+ * "Notes," for the full writeup.
  *
  * Wiring:
  *   INMP441 SCK  -> LOOPBACK_MIC_GPIO_BCK   (see sdkconfig.defaults.<target>)
@@ -103,13 +78,11 @@
  * README for this and other PCM5102-specific pins.)
  */
 #include <stdint.h>
-#include <stdbool.h>
 #include <string.h>
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/queue.h"
 
 #include "i2s_mic.h"
 #include "i2s_spk.h"
@@ -123,14 +96,12 @@
 #define MIC_CHANNEL_COUNT     2
 #define KEEP_SLOT             0
 
-#define NUM_BUFS        4
-#define BUF_FRAMES      480    /* chosen to stay under classic ESP32's I2S
-                                 * DMA descriptor size limit without being
-                                 * silently clamped (unlike 512, which the
-                                 * driver clamps to 511 — see i2s_spk's
-                                 * examples' own history with this). Also
-                                 * directly sets relay latency: 480 frames
-                                 * / 16000 Hz = 30 ms per hop. */
+#define MIC_DMA_BUFFER_COUNT  6      /* the driver can hold 5 unread buffers (~150 ms) */
+#define BUF_FRAMES            480    /* 30 ms at 16 kHz. One DMA buffer is capped
+                                      * at 4092 bytes, so at 8 bytes per stereo
+                                      * 32-bit frame the most is 511; i2s_mic_init()
+                                      * rejects anything larger. Also sets the
+                                      * capture side of the relay latency. */
 #define MIC_BUF_BYTES   (BUF_FRAMES * MIC_CHANNEL_COUNT * (MIC_BITS_PER_SAMPLE / 8))
 
 /* ---- Speaker-side playback configuration ------------------------------ */
@@ -141,99 +112,54 @@
 #define SPK_DMA_BUFFER_COUNT  6
 #define SPK_DMA_BUFFER_SIZE   2048
 
-static uint8_t s_bufs[NUM_BUFS][MIC_BUF_BYTES];
-static uint8_t s_stereo_out_buf[BUF_FRAMES * SPK_CHANNEL_COUNT * (SPK_BITS_PER_SAMPLE / 8)];
+/* One capture buffer and one output buffer: the relay task reads, converts
+ * and sends one DMA buffer at a time. */
+static int32_t s_mic_buf[BUF_FRAMES * MIC_CHANNEL_COUNT];
+static int16_t s_spk_buf[BUF_FRAMES * SPK_CHANNEL_COUNT];
 
-typedef struct {
-    uint8_t *buf;
-    size_t   bytes_read;
-} filled_item_t;
-
-static QueueHandle_t s_free_q;
-static QueueHandle_t s_filled_q;
-
-static volatile uint32_t s_last_overflow_count = 0;
-static volatile uint32_t s_last_no_buffer_count = 0;
 static volatile uint32_t s_short_write_count = 0;
 
-/* ------------------------------------------------------------------------
- * i2s_mic callbacks (ISR context — see i2s_mic.h's rules before editing)
- * ---------------------------------------------------------------------- */
-
-static void IRAM_ATTR mic_ready_cb(uint8_t *buffer, size_t bytes_read, void *user_ctx)
-{
-    (void)user_ctx;
-    BaseType_t hp_woken = pdFALSE;
-
-    filled_item_t item = { .buf = buffer, .bytes_read = bytes_read };
-    xQueueSendFromISR(s_filled_q, &item, &hp_woken);
-
-    uint8_t *free_buf;
-    if (xQueueReceiveFromISR(s_free_q, &free_buf, &hp_woken) == pdTRUE) {
-        i2s_mic_request_buffer(free_buf, MIC_BUF_BYTES);
-    }
-
-    portYIELD_FROM_ISR(hp_woken);
-}
-
-static void mic_overflow_cb(uint32_t total_overflow_count, uint32_t total_no_buffer_count, void *user_ctx)
-{
-    (void)user_ctx;
-    s_last_overflow_count = total_overflow_count;
-    s_last_no_buffer_count = total_no_buffer_count;
-}
-
-/* Duplicate each mono 16-bit sample into both L and R slots — see the file
+/* Keep KEEP_SLOT of each stereo frame, downconvert INMP441's 32-bit sample
+ * to 16-bit, and duplicate it into both speaker slots — see the file
  * header's "SPEAKER PLAYBACK: WHY STEREO, NOT MONO" section. */
-static void upmix_mono_to_stereo(const int16_t *mono, size_t num_samples, uint8_t *stereo_bytes)
+static size_t convert_for_speaker(const int32_t *mic, size_t mic_bytes, int16_t *spk)
 {
-    int16_t *dst = (int16_t *)stereo_bytes;
-    for (size_t i = 0; i < num_samples; i++) {
-        dst[2 * i]     = mono[i];
-        dst[2 * i + 1] = mono[i];
+    size_t frames = mic_bytes / (MIC_CHANNEL_COUNT * sizeof(int32_t));
+    for (size_t i = 0; i < frames; i++) {
+        int16_t s = (int16_t)(mic[MIC_CHANNEL_COUNT * i + KEEP_SLOT] >> 16);
+        spk[2 * i]     = s;
+        spk[2 * i + 1] = s;
     }
+    return frames * SPK_CHANNEL_COUNT * (SPK_BITS_PER_SAMPLE / 8);
 }
 
 /* ------------------------------------------------------------------------
- * audio_relay_task — the entire demo. Pull a filled mic buffer, convert
- * it, hand it straight to the speaker, repeat forever.
+ * audio_relay_task — the entire demo. Read a mic buffer, convert it, hand
+ * it straight to the speaker, repeat forever.
  * ---------------------------------------------------------------------- */
 
 static void audio_relay_task(void *arg)
 {
     (void)arg;
-    filled_item_t item;
-    static int16_t s_mono_scratch[BUF_FRAMES];
 
     while (1) {
-        if (xQueueReceive(s_filled_q, &item, portMAX_DELAY) != pdTRUE) {
+        size_t bytes_read = 0;
+        esp_err_t ret = i2s_mic_read(s_mic_buf, MIC_BUF_BYTES, &bytes_read, portMAX_DELAY);
+        if (ret != ESP_OK) {
+            /* Only happens if capture is stopped; this example never stops. */
+            ESP_LOGE(TAG, "i2s_mic_read failed: %s", esp_err_to_name(ret));
+            vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
 
-        int32_t *src = (int32_t *)item.buf;
-        size_t num_frames = item.bytes_read / (MIC_CHANNEL_COUNT * sizeof(int32_t));
-        if (num_frames > BUF_FRAMES) {
-            num_frames = BUF_FRAMES;   /* defensive; shouldn't happen */
-        }
-
-        for (size_t i = 0; i < num_frames; i++) {
-            s_mono_scratch[i] = (int16_t)(src[MIC_CHANNEL_COUNT * i + KEEP_SLOT] >> 16);
-        }
-
-        /* item.buf is safe to reuse the moment we're done reading from it —
-         * return it to the pool before doing the (potentially blocking)
-         * speaker write below, so the mic side is never held up waiting on
-         * the speaker. */
-        xQueueSend(s_free_q, &item.buf, portMAX_DELAY);
-
-        upmix_mono_to_stereo(s_mono_scratch, num_frames, s_stereo_out_buf);
-        size_t stereo_len = num_frames * SPK_CHANNEL_COUNT * (SPK_BITS_PER_SAMPLE / 8);
+        size_t out_len = convert_for_speaker(s_mic_buf, bytes_read, s_spk_buf);
+        uint8_t *out = (uint8_t *)s_spk_buf;   /* i2s_spk_send_buffer() takes a non-const pointer */
 
         size_t sent = 0;
-        while (sent < stereo_len) {
+        while (sent < out_len) {
             size_t this_sent = 0;
-            esp_err_t ret = i2s_spk_send_buffer(s_stereo_out_buf + sent, stereo_len - sent, &this_sent);
-            if (this_sent < stereo_len - sent) {
+            ret = i2s_spk_send_buffer(out + sent, out_len - sent, &this_sent);
+            if (this_sent < out_len - sent) {
                 s_short_write_count++;
             }
             if (ret != ESP_OK && ret != ESP_ERR_TIMEOUT) {
@@ -251,18 +177,17 @@ static void audio_relay_task(void *arg)
 static void status_report_task(void *arg)
 {
     (void)arg;
-    uint32_t last_ovf = 0, last_nobuf = 0, last_short = 0;
+    uint32_t last_lost = 0, last_short = 0;
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(2000));
-        uint32_t ovf = s_last_overflow_count;
-        uint32_t nobuf = s_last_no_buffer_count;
+        uint32_t lost = i2s_mic_get_overflow_count();
         uint32_t shortw = s_short_write_count;
-        if (ovf != last_ovf || nobuf != last_nobuf || shortw != last_short) {
-            ESP_LOGW(TAG, "mic: dma_overflow=%u no_buffer=%u | spk: short_write=%u",
-                     ovf, nobuf, shortw);
-            last_ovf = ovf;
-            last_nobuf = nobuf;
+        if (lost != last_lost || shortw != last_short) {
+            ESP_LOGW(TAG, "mic: audio lost %u buffers (%u ms) | spk: short_write=%u",
+                     (unsigned)lost, (unsigned)(lost * BUF_FRAMES * 1000u / SAMPLE_RATE),
+                     (unsigned)shortw);
+            last_lost = lost;
             last_short = shortw;
         }
     }
@@ -274,9 +199,6 @@ static void status_report_task(void *arg)
 
 void app_main(void)
 {
-    s_free_q = xQueueCreate(NUM_BUFS, sizeof(uint8_t *));
-    s_filled_q = xQueueCreate(NUM_BUFS, sizeof(filled_item_t));
-
     i2s_mic_config_t mic_cfg = {
         .sample_rate = SAMPLE_RATE,
         .bits_per_sample = MIC_BITS_PER_SAMPLE,
@@ -286,12 +208,8 @@ void app_main(void)
         .gpio_ws = CONFIG_LOOPBACK_MIC_GPIO_WS,
         .gpio_data = CONFIG_LOOPBACK_MIC_GPIO_DATA,
         .port = I2S_NUM_0,
-        .dma_buffer_count = 6,
+        .dma_buffer_count = MIC_DMA_BUFFER_COUNT,
         .dma_buffer_size = MIC_BUF_BYTES,
-        .max_pending_buffers = NUM_BUFS,
-        .cb = mic_ready_cb,
-        .overflow_cb = mic_overflow_cb,
-        .user_ctx = NULL,
     };
 
     i2s_spk_config_t spk_cfg = {
@@ -311,25 +229,19 @@ void app_main(void)
         .user_ctx = NULL,
     };
 
-    /* Both initialized once, here, and never deinited — that's the entire
-     * difference from loopback-esp32c3. On a 2-I2S-peripheral chip these
-     * two calls don't contend for anything. */
+    /* Both initialized once, here, and never deinited. On a
+     * 2-I2S-peripheral chip these two calls don't contend for anything. */
     ESP_ERROR_CHECK(i2s_mic_init(&mic_cfg));
     ESP_ERROR_CHECK(i2s_spk_init(&spk_cfg));
-
-    for (int i = 0; i < NUM_BUFS; i++) {
-        ESP_ERROR_CHECK(i2s_mic_request_buffer(s_bufs[i], MIC_BUF_BYTES));
-    }
 
     ESP_ERROR_CHECK(i2s_mic_start());
     ESP_ERROR_CHECK(i2s_spk_start());
 
-    ESP_LOGI(TAG, "Live loopback running — speak into the mic.");
-
     xTaskCreate(audio_relay_task, "audio_relay", 4096, NULL, 5, NULL);
     xTaskCreate(status_report_task, "status_report", 2048, NULL, 1, NULL);
 
-    /* Nothing left for app_main() to do — both components run forever,
-     * driven entirely by mic_ready_cb() and audio_relay_task(). */
+    ESP_LOGI(TAG, "Live loopback running — speak into the mic.");
+
+    /* Nothing left for app_main() to do — the relay task runs forever. */
     vTaskDelete(NULL);
 }

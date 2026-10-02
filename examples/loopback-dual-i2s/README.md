@@ -1,48 +1,45 @@
 # i2s_spk + i2s_mic live loopback example (dual I2S peripheral)
 
 **For ESP32 and ESP32-S3** — both have two independent I2S peripherals, so
-`i2s_mic` and `i2s_spk` can run `INITIALIZED` and `RUNNING` at the same
-time, on separate ports, with no contention. This example does exactly
-that: capture with `i2s_mic` on `I2S_NUM_0`, relay straight into `i2s_spk`
-on `I2S_NUM_1`, continuously, in real time. No PC, no RAM recording
-buffer, no repeated init/deinit cycling — both components are set up once
+`i2s_mic` and `i2s_spk` can run at the same time on separate ports. This
+example captures with `i2s_mic` on `I2S_NUM_0` and relays straight into
+`i2s_spk` on `I2S_NUM_1`, continuously, in real time. No PC, no RAM
+recording buffer, no repeated init/deinit: both components are set up once
 at boot and run forever.
 
 This example lives inside the `i2s_spk` repository and pulls in `i2s_mic`
-from the **ESP Component Registry** (see `main/idf_component.yml`). An
-identical copy lives inside the `i2s_mic` repository's own
+from the **ESP Component Registry** (see `main/idf_component.yml`). The
+same example lives in the `i2s_mic` repository as
 `examples/loopback-dual-i2s`, pulling in `i2s_spk` from the registry
-instead.
+instead. The code is identical.
 
-**This is NOT the same example as `examples/loopback-esp32c3`.** That one
-exists specifically because ESP32-C3 (and C6) have only a single I2S
-peripheral, which forces a record-then-playback structure with repeated
-teardown/bringup of each component. ESP32 and ESP32-S3 don't have that
-constraint, so this example skips all of that: it's simpler, and the
-loopback is genuinely live (roughly one relay-buffer's worth of latency —
-tens of milliseconds — rather than a multi-second record/playback delay).
-**Don't try to build this example for ESP32-C3/C6** — it will fail at
-`i2s_spk_init()`, since `i2s_mic` will already own the chip's only I2S
-controller. Use `examples/loopback-esp32c3` for those chips instead.
+**This is not the single-I2S loopback example** (`examples/loopback-esp32c3` in this repository). That one
+exists because ESP32-C3 (and C6) have only one I2S peripheral, which
+forces a record-then-playback structure with each component torn down
+between phases. ESP32 and ESP32-S3 don't have that constraint, so this
+example is simpler and genuinely live. **Don't build it for
+ESP32-C3/C6** — `i2s_spk_init()` will fail, because `i2s_mic` already owns
+the chip's only I2S controller.
 
 ---
 
-## Why this example exists as a separate thing at all
+## How it works
 
-It would be tempting to just make `examples/loopback-esp32c3`'s
-record-then-playback structure "the" loopback example and use it
-everywhere, since it's portable to every chip both components support.
-But paying that structure's cost on chips that don't need it turned out to
-have a real, measured downside: testing `examples/loopback-esp32c3` on
-classic ESP32 showed its repeated `i2s_mic_init()`/`deinit()` cycling
-producing a large, suspiciously constant number of DMA-level overflow
-events every single cycle — consistent with a fixed cost tied to channel
-bring-up/teardown rather than an ongoing throughput problem — which
-`i2s_mic`'s own single-init streaming examples don't exhibit at all. That's
-still being tracked down on the `loopback-esp32c3` side. This example
-avoids the question entirely by never doing that cycling in the first
-place, which is also simply the more natural thing to do on a chip that
-doesn't need the workaround.
+One relay task does everything:
+
+1. `i2s_mic_read()` blocks until the next 30 ms capture buffer is ready and
+   copies it.
+2. The buffer is converted: keep one slot of each 32-bit stereo frame,
+   downconvert to 16-bit, and duplicate each sample into both speaker
+   slots (see the comments in `main/app_main.c` for why each step exists).
+3. `i2s_spk_send_buffer()` writes it to the speaker and blocks until the
+   speaker has room, which paces the loop.
+
+While the speaker write blocks, new microphone buffers wait in the I2S
+driver's own queue (up to 5, about 150 ms). Both sides run from the same
+16 kHz clock, so the relay keeps up and no audio is lost. If it ever falls
+behind by more than that, `i2s_mic_get_overflow_count()` counts the dropped
+buffers and the status task logs them.
 
 ---
 
@@ -71,23 +68,21 @@ Both devices are wired at all times, on separate I2S peripherals.
 
 If you're using a GY-PCM5102 board instead of a MAX98357A, remember its
 **XSMT pin must be tied to 3.3V** or the DAC's output stays soft-muted —
-see this component's own README for this and its other PCM5102-specific
-pins (SCK, FMT).
+see `i2s_spk`'s README for this and its other PCM5102-specific pins (SCK,
+FMT).
 
-Default pin numbers per target live in `sdkconfig.defaults.esp32` and
-`sdkconfig.defaults.esp32s3`; override via `idf.py menuconfig` → "i2s_mic
-+ i2s_spk live loopback example (dual I2S peripheral)" if your wiring
-differs.
+Default pins per target are in `sdkconfig.defaults.esp32` and
+`sdkconfig.defaults.esp32s3`; override them in `idf.py menuconfig` →
+"i2s_mic + i2s_spk live loopback example (dual I2S peripheral)".
 
 ---
 
 ## Registry dependency note
 
-`main/idf_component.yml` declares a dependency on `embedblocks/i2s_mic`
-from the ESP Component Registry. **If that exact version isn't available
-there yet**, this won't resolve as-is — see the comment block inside
-`main/idf_component.yml` for how to override it to build against a local
-`i2s_mic` checkout in the meantime (`override_path`).
+`main/idf_component.yml` requires `embedblocks/i2s_mic` **0.2.0 or later**
+(the `i2s_mic_read()` API). Until 0.2.0 is published, the comment in that
+file shows how to build against a local `i2s_mic` checkout with
+`override_path`.
 
 ---
 
@@ -103,44 +98,33 @@ idf.py -p /dev/ttyUSB0 flash monitor    # adjust port for your OS/board
 I (...) LOOPBACK_LIVE: Live loopback running — speak into the mic.
 ```
 
-Speak into the microphone — you should hear it played back with only a
-small, roughly constant delay, continuously, for as long as the board runs.
+Speak into the microphone — you should hear it played back with a small,
+constant delay, for as long as the board runs. The status task logs only
+when something changes, so a quiet log means no audio was lost and no
+speaker write came up short.
 
-## Known limitations of this example
+---
 
-- No format negotiation — fixed 16 kHz, mono microphone downmixed and
-  upmixed for a stereo-input DAC/amp (see the file header comment in
-  `main/app_main.c` for both conversions and why each exists).
-- `short_write_count` is tracked (see this component's own README, "On
-  underrun/overrun tracking") but there's no `underrun_estimate_count`
-  heuristic here the way the streaming examples have one — this example's
-  relay loop has no natural "expected chunk duration" reference point the
-  way a PC-paced protocol does, since here the mic itself is what's already
-  pacing the relay.
-- ESP32-C3/C6 are explicitly unsupported — use `examples/loopback-esp32c3`
-  for those chips.
-- **`dma_overflow` climbs alongside successful captures on classic ESP32
-  with this example's exact settings (GPIO 14/15/32 for the mic), at
-  close to a 1:1 rate with genuinely successful receives — but this does
-  NOT correspond to actual audio loss.** This was confirmed by direct
-  instrumentation: a logic analyzer probing debug GPIOs toggled at the top
-  of `i2s_mic.c`'s `mic_on_recv()` and `mic_on_recv_q_ovf()` showed both
-  firing every ~32 ms, `on_recv_q_ovf` consistently ~88µs after
-  `on_recv`, with `mic_on_recv()`'s own logic (per its source) only ever
-  invoking `overflow_cb` when no application buffer was available — and
-  `no_buffer` stayed at 0 throughout. Captured sample content was
-  confirmed to be real, live, varying audio (not silence or a fixed
-  pattern), and the relayed playback was listened to directly and
-  confirmed clean and continuous, with no audible jumps or dropouts. The
-  exact mechanism inside ESP-IDF's I2S driver causing `on_recv_q_ovf` to
-  fire this often here — when an otherwise-identical `i2s_mic.c` running
-  in `i2s_mic`'s own original continuous streaming example (different
-  GPIOs: 16/17/18) never exercises this path at all — has not been
-  identified. The two known-ruled-out causes are `BUF_FRAMES` (tested at
-  both 480 and 512, no change) and concurrent `i2s_spk` operation (tested
-  with `i2s_spk_init()` never called at all, no change); the GPIO pins
-  themselves are the last remaining untested variable. If you hit this
-  and get further with it — including if it turns out to correspond to
-  real data loss on a different board/config, contradicting the "clean
-  audio" result above — please feed it back so this note can be corrected
-  or resolved.
+## Known limitations
+
+- Fixed format: 16 kHz, one mono microphone slot, upmixed for a
+  stereo-input DAC/amp.
+- `short_write` counts speaker writes that returned less than requested.
+  There's no underrun estimate here as in the streaming examples, since the
+  microphone itself paces the relay.
+- ESP32-C3/C6 are not supported — use the single-I2S loopback example.
+
+### About the old `dma_overflow` note
+
+With `i2s_mic` 0.1.x, this example's log showed `dma_overflow` climbing at
+about one per capture buffer while the audio was clean and `no_buffer`
+stayed at 0. A logic analyzer showed `on_recv_q_ovf` firing about 88 µs
+after `on_recv` on every buffer. That was not audio loss and not caused by
+the GPIOs: 0.1.x copied audio in the driver's `on_recv` callback but never
+called `i2s_channel_read()`, so the driver's internal queue filled after 5
+buffers and the driver reported a "full queue" on every buffer after that.
+`i2s_mic` 0.2.0 reads through `i2s_channel_read()`, so its overflow count
+only rises when audio is really dropped. The same effect explains the
+"large, nearly constant" overflow count per cycle seen with 0.1.x in the
+single-I2S loopback: a fixed-length recording produced a fixed number of
+spurious events.

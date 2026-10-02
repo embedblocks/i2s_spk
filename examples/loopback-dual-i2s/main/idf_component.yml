@@ -1,2 +1,17 @@
+## i2s_spk itself is NOT listed here: this example lives inside the i2s_spk
+## repository and builds against the local checkout via EXTRA_COMPONENT_DIRS
+## in the top-level CMakeLists.txt. i2s_mic comes from the registry.
+
 dependencies:
-  embedblocks/i2s_mic: "^0.1.3"
+  idf: ">=6.0,<6.1"
+  embedblocks/i2s_mic: "^0.2.0"
+
+  ## 0.2.0 replaced the callback API with i2s_mic_read(); this example needs
+  ## it. Until 0.2.0 is published, build against a local checkout instead by
+  ## replacing the line above with:
+  ##
+  ##   embedblocks/i2s_mic:
+  ##     version: "*"
+  ##     override_path: "../../../i2s_mic"
+  ##
+  ## (path relative to this file — adjust to wherever you cloned i2s_mic.)
