@@ -114,8 +114,7 @@
 
 /* WIRE_CHANNEL_COUNT describes the mono PCM format the PC sends over the
  * wire (spk_audio_send.py always converts to mono) — used for the audio
- * header and the underrun-heuristic duration math below, both of which
- * are about the wire format, not what actually goes to the DAC.
+ * header, which is about the wire format, not what actually goes to the DAC.
  *
  * SPK_CHANNEL_COUNT is what's actually requested from i2s_spk. It is
  * deliberately STEREO, not MONO, even though the audio itself is mono —
@@ -123,7 +122,6 @@
  * for why. */
 #define WIRE_CHANNEL_COUNT   1
 #define SPK_CHANNEL_COUNT    2
-#define BYTES_PER_FRAME      (WIRE_CHANNEL_COUNT * (BITS_PER_SAMPLE / 8))
 
 #define GPIO_BCK          12
 #define GPIO_WS           13
@@ -157,7 +155,7 @@ static uint8_t s_chunk_buf[CHUNK_BYTES];        /* raw mono PCM received from th
 static uint8_t s_stereo_buf[CHUNK_BYTES * 2];   /* upmixed L=R stereo PCM handed to i2s_spk */
 
 static uint32_t s_short_write_count;
-static uint32_t s_underrun_estimate_count;
+static uint32_t s_underruns_at_start;
 static uint32_t s_chunks_played;
 
 /* ------------------------------------------------------------------------
@@ -246,15 +244,10 @@ static void run_playback_session(void)
     uart_wait_tx_done(UART_NUM_0, portMAX_DELAY);
 
     s_short_write_count = 0;
-    s_underrun_estimate_count = 0;
+    s_underruns_at_start = i2s_spk_get_underrun_count();
     s_chunks_played = 0;
 
-    uint64_t prev_chunk_duration_us = 0;
-    bool have_prev_chunk = false;
-
     while (1) {
-        uint64_t wait_start_us = esp_timer_get_time();
-
         uint8_t len_bytes[4];
         read_exact(len_bytes, sizeof(len_bytes));
         uint32_t chunk_len = (uint32_t)len_bytes[0]
@@ -274,20 +267,16 @@ static void run_playback_session(void)
         }
 
         read_exact(s_chunk_buf, chunk_len);
-        uint64_t data_ready_us = esp_timer_get_time();
-
-        if (have_prev_chunk) {
-            uint64_t idle_gap_us = data_ready_us - wait_start_us;
-            if (idle_gap_us > prev_chunk_duration_us) {
-                s_underrun_estimate_count++;
-            }
-        }
 
         /* Upmix the received mono chunk into interleaved stereo (L=R) —
          * see upmix_mono_to_stereo()'s comment for why i2s_spk is
          * configured STEREO here even though the source audio is mono. */
         upmix_mono_to_stereo(s_chunk_buf, chunk_len, s_stereo_buf);
         size_t stereo_len = chunk_len * 2;
+
+        if (s_chunks_played == 0) {
+            s_underruns_at_start = i2s_spk_get_underrun_count();
+        }
 
         size_t sent = 0;
         while (sent < stereo_len) {
@@ -308,21 +297,15 @@ static void run_playback_session(void)
         }
         s_chunks_played++;
 
-        /* Duration is computed from the ORIGINAL mono chunk_len (the wire
-         * format), not the expanded stereo_len — the number of audio
-         * frames actually played per second is unaffected by upmixing;
-         * only the bytes-per-frame at the DAC changed. */
-        prev_chunk_duration_us = ((uint64_t)chunk_len / BYTES_PER_FRAME) * 1000000ULL / SAMPLE_RATE;
-        have_prev_chunk = true;
-
         uint8_t ack = ACK_BYTE;
         write_exact(&ack, 1);
     }
 
     esp_log_level_set("*", ESP_LOG_INFO);
     ESP_LOGI(TAG, "playback session complete: %" PRIu32 " chunks, "
-             "%" PRIu32 " short writes, %" PRIu32 " estimated underruns",
-             s_chunks_played, s_short_write_count, s_underrun_estimate_count);
+             "%" PRIu32 " short writes, %" PRIu32 " DMA underruns",
+             s_chunks_played, s_short_write_count,
+             i2s_spk_get_underrun_count() - s_underruns_at_start);
 }
 
 /* ------------------------------------------------------------------------
@@ -411,7 +394,7 @@ void app_main(void)
         .port = I2S_NUM_0,
         .dma_buffer_count = DMA_BUFFER_COUNT,
         .dma_buffer_size = DMA_BUFFER_SIZE,
-        .write_timeout = portMAX_DELAY,
+        .write_timeout_ms = I2S_SPK_WAIT_FOREVER,
         .user_ctx = NULL,
     };
 

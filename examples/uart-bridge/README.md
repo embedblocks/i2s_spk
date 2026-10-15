@@ -141,10 +141,10 @@ handshake baud rate, after each completed stream.
    end-of-stream marker. Each chunk is handed to `i2s_spk_send_buffer()`
    in a loop that accounts for partial transfers, then ACKed.
 6. Logging is re-enabled and a summary is printed once the end marker is
-   seen: chunks played, `short_write_count` (driver-confirmed partial
-   transfers — see `i2s_spk`'s README), and `underrun_estimate_count` (a
-   best-effort, timing-based estimate — also see `i2s_spk`'s README, "On
-   underrun/overrun tracking," for why this can only be an estimate).
+   seen: chunks played, `short_write_count` (partial transfers — see
+   `i2s_spk`'s README), and DMA underruns during the session (from
+   `i2s_spk_get_underrun_count()`, measured from just before the first
+   write — see `i2s_spk`'s README, "Underrun counter").
 7. UART0 drops back to `HANDSHAKE_BAUD` and the firmware waits for the
    next trigger.
 
@@ -153,8 +153,6 @@ handshake baud rate, after each completed stream.
 - One playback session at a time — no mixing, no queueing multiple files.
 - No compression, no format negotiation beyond the fixed 16 kHz/16-bit/
   mono the PC script always converts to.
-- `underrun_estimate_count` is an estimate, not a hardware-confirmed
-  count — see `i2s_spk`'s README for why no confirmed signal exists in V1.
 - Sharing UART0 for both the ESP-IDF console and the audio stream means
   you lose console log visibility for the duration of each playback
   session.

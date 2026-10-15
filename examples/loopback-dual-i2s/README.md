@@ -110,8 +110,10 @@ speaker write came up short.
 - Fixed format: 16 kHz, one mono microphone slot, upmixed for a
   stereo-input DAC/amp.
 - `short_write` counts speaker writes that returned less than requested.
-  There's no underrun estimate here as in the streaming examples, since the
-  microphone itself paces the relay.
+  `underrun` is `i2s_spk_get_underrun_count()`: DMA buffers that played as
+  silence because the relay fell behind. With the default 6 × 2048-byte
+  speaker ring (about 32 ms per buffer), the relay can stall for roughly
+  160 ms before this rises.
 - ESP32-C3/C6 are not supported — use the single-I2S loopback example.
 
 ### About the old `dma_overflow` note

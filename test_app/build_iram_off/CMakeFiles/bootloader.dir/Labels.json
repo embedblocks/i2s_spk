@@ -1,0 +1,43 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/build_iram_off/CMakeFiles/bootloader"
+		},
+		{
+			"file" : "E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/build_iram_off/CMakeFiles/bootloader.rule"
+		},
+		{
+			"file" : "E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/build_iram_off/CMakeFiles/bootloader-complete.rule"
+		},
+		{
+			"file" : "E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/build_iram_off/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule"
+		},
+		{
+			"file" : "E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/build_iram_off/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule"
+		},
+		{
+			"file" : "E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/build_iram_off/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule"
+		},
+		{
+			"file" : "E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/build_iram_off/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule"
+		},
+		{
+			"file" : "E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/build_iram_off/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule"
+		},
+		{
+			"file" : "E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/build_iram_off/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule"
+		},
+		{
+			"file" : "E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/build_iram_off/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"bootloader"
+		],
+		"name" : "bootloader"
+	}
+}

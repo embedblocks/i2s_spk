@@ -1,0 +1,6 @@
+-Wno-frame-address
+-mlongcalls
+-fno-builtin-memcpy
+-fno-builtin-memset
+-fno-builtin-bzero
+"-specs=E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/build_iram_off/specs/picolibc.specs"

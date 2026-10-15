@@ -148,7 +148,6 @@ hear it played back a moment later through the speaker.
 - Not true real-time loopback (see "Why record-then-playback" above).
 - Same audio-quality caveats as `i2s_mic`'s and `i2s_spk`'s own examples:
   the mono-extraction shift amount (`>> 16`) is a starting point, not a
-  calibrated value, and this example doesn't track `short_write_count` /
-  `underrun_estimate_count`-style telemetry the way `i2s_spk`'s own
-  streaming examples do — see that component's README for where that
-  telemetry actually lives and why.
+  calibrated value. The only speaker telemetry is the DMA underrun count
+  printed with "Playback complete" (see `i2s_spk`'s README, "Underrun
+  counter").

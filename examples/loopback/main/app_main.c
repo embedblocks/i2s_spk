@@ -337,7 +337,7 @@ static void run_playback_phase(void)
         .port = I2S_NUM_0,
         .dma_buffer_count = 6,
         .dma_buffer_size = 2048,
-        .write_timeout = portMAX_DELAY,
+        .write_timeout_ms = I2S_SPK_WAIT_FOREVER,
         .user_ctx = NULL,
     };
 
@@ -381,10 +381,14 @@ static void run_playback_phase(void)
         offset += want;
     }
 
+    /* Read before stop(): the queued tail is still playing, so this counts
+     * only gaps during playback, not the idle time after the last write. */
+    uint32_t underruns = i2s_spk_get_underrun_count();
+
     ESP_ERROR_CHECK(i2s_spk_stop());
     ESP_ERROR_CHECK(i2s_spk_deinit());
 
-    ESP_LOGI(TAG, "Playback complete");
+    ESP_LOGI(TAG, "Playback complete (%u DMA underruns)", (unsigned)underruns);
 }
 
 /* ------------------------------------------------------------------------

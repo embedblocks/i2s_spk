@@ -1,0 +1,20 @@
+Command: cmake -G Ninja -B E:\vscodeespidf\projectworkspace\components-new\i2s_spk\i2s_spk\test_app\build_iram_off -DPYTHON_DEPS_CHECKED=1 -DPYTHON=E:\ESPIDF\frameworks\esp-idf-v6.0.3\.espressif\v6.0.3\tools\python\v6.0.3\venv\Scripts\python.exe -DESP_PLATFORM=1 -DSDKCONFIG=sdkconfig -DCCACHE_ENABLE=True E:\vscodeespidf\projectworkspace\components-new\i2s_spk\i2s_spk\test_app
+NOTE: E:/ESPIDF/frameworks/esp-idf-v6.0.3/.espressif/v6.0.3/esp-idf/components/bt/host/nimble/Kconfig.in:1453: BT_NIMBLE_MESH_PROVISIONER: 'default 0' is not a valid bool value (only 'y' and 'n' are allowed). Value is treated as 'n'.
+NOTE: E:/ESPIDF/frameworks/esp-idf-v6.0.3/.espressif/v6.0.3/esp-idf/components/bt/controller/esp32/Kconfig.in:177: BTDM_CTRL_LEGACY_AUTH_VENDOR_EVT_EFF: 'default 0' is not a valid bool value (only 'y' and 'n' are allowed). Value is treated as 'n'.
+NOTE: E:/ESPIDF/frameworks/esp-idf-v6.0.3/.espressif/v6.0.3/esp-idf/components/fatfs/Kconfig:230: FATFS_PRINT_LLI: 'default 0' is not a valid bool value (only 'y' and 'n' are allowed). Value is treated as 'n'.
+NOTE: E:/ESPIDF/frameworks/esp-idf-v6.0.3/.espressif/v6.0.3/esp-idf/components/fatfs/Kconfig:235: FATFS_PRINT_FLOAT: 'default 0' is not a valid bool value (only 'y' and 'n' are allowed). Value is treated as 'n'.
+Loading defaults file E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/sdkconfig.defaults...
+Default value for TEST_SPK_GPIO_BCK in sdkconfig is 19 but it is 26 according to Kconfig.
+Using default value from sdkconfig (19).
+Default value for TEST_SPK_GPIO_WS in sdkconfig is 22 but it is 25 according to Kconfig.
+Using default value from sdkconfig (22).
+Default value for TEST_SPK_GPIO_DATA in sdkconfig is 23 but it is 22 according to Kconfig.
+Using default value from sdkconfig (23).
+NOTE: Kconfig parser version: 1
+NOTE: Kconfig defaults policy: use sdkconfig
+NOTE: Status: Finished with notifications
+NOTE: E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/main/Kconfig.projbuild:3: TEST_SPK_GPIO_BCK: Kconfig default value: 26, sdkconfig default value: 19
+NOTE: E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/main/Kconfig.projbuild:8: TEST_SPK_GPIO_WS: Kconfig default value: 25, sdkconfig default value: 22
+NOTE: E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/main/Kconfig.projbuild:13: TEST_SPK_GPIO_DATA: Kconfig default value: 22, sdkconfig default value: 23
+HINT: This area reports issues with default values of the config options.
+For more information, please visit https://docs.espressif.com/projects/esp-idf-kconfig/en/latest/kconfiglib/configuration-report.html#default-value-mismatch

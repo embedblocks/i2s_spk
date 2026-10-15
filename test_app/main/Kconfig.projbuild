@@ -1,0 +1,18 @@
+menu "i2s_spk test app"
+
+    config TEST_SPK_GPIO_BCK
+        int "I2S BCK GPIO"
+        default 26 if IDF_TARGET_ESP32
+        default 4
+
+    config TEST_SPK_GPIO_WS
+        int "I2S WS GPIO"
+        default 25 if IDF_TARGET_ESP32
+        default 5
+
+    config TEST_SPK_GPIO_DATA
+        int "I2S DATA GPIO"
+        default 22 if IDF_TARGET_ESP32
+        default 6
+
+endmenu

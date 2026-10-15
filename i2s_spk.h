@@ -5,36 +5,34 @@
  * and its companion implementation specification for the full contract this
  * header implements. In particular:
  *
- *   - Like i2s_mic, this component has no internal FreeRTOS task. Unlike
- *     i2s_mic, it also has no application-facing ISR callback at all:
+ *   - Like i2s_mic, this component has no internal FreeRTOS task.
  *     i2s_spk_send_buffer() is an ordinary *blocking* call that runs in the
  *     caller's own task context. Its return is the sole completion signal —
- *     there is no separate "buffer consumed" callback (design document
- *     Section 5.2; this was a deliberate, explicit removal, not an
- *     oversight — see the implementation specification's Section 13).
- *   - There is no software-detected underrun condition in V1. ESP-IDF
- *     provides no TX underrun callback; when the application does not
- *     supply data fast enough, the channel's auto_clear behavior inserts
- *     silence instead of repeating stale data or stalling (design document
- *     Section 3.2). This component does not invent a detector for that
- *     condition — see the design document's Open Question 2 and the
- *     implementation specification's "Do Not Invent" list (Section 13).
- *     Applications that want an approximate, best-effort signal for this
- *     can time their own send loop against the buffer's real-time playback
- *     duration — both example projects in this distribution do exactly
- *     that, entirely at the application layer; see their READMEs.
+ *     there is no "buffer consumed" callback (design document Section 5.2).
+ *   - Underruns are counted, not inferred. ESP-IDF's TX DMA interrupt
+ *     reports a "send queue overflow" (on_send_q_ovf) when a DMA buffer
+ *     finishes playing while every free buffer is still unclaimed by the
+ *     application — i.e. DMA has run out of fresh audio and is now playing
+ *     buffers that auto_clear has zeroed. i2s_spk registers that callback
+ *     and exposes the count via i2s_spk_get_underrun_count(). (Versions
+ *     before 0.2.0 documented this callback backwards; see CHANGELOG.)
  *   - This is a singleton component: only one i2s_spk instance exists per
  *     firmware image (see the design document's Open Question 5). On
  *     chips with a single I2S peripheral (SOC_I2S_NUM == 1), i2s_spk and
  *     i2s_mic must not be simultaneously initialized — see the
  *     implementation specification's Section 10.
+ *
+ * Real-time use: enable CONFIG_I2S_ISR_IRAM_SAFE. Without it, the I2S DMA
+ * interrupt is held off while flash is being written or erased; if more
+ * than one DMA buffer completes in that window, the driver only sees the
+ * last one, and the underrun count (and the driver's free-buffer
+ * bookkeeping) can go wrong. See the README.
  */
 #pragma once
 
 #include <stdint.h>
 #include <stddef.h>
 #include "esp_err.h"
-#include "freertos/FreeRTOS.h"
 #include "driver/i2s_std.h"
 #include "driver/i2s_common.h"
 
@@ -42,11 +40,19 @@
 extern "C" {
 #endif
 
+/**
+ * Value for i2s_spk_config_t::write_timeout_ms meaning "block until the
+ * data is accepted". ESP-IDF converts the timeout with pdMS_TO_TICKS()
+ * internally, so this is in practice a very long wait (about 49.7 days at
+ * a 100 Hz tick rate) rather than a literal portMAX_DELAY.
+ */
+#define I2S_SPK_WAIT_FOREVER  UINT32_MAX
+
 typedef struct {
     int sample_rate;
 
-    /** 16 or 32 only. 24-bit is not supported in V1 (see implementation
-     *  spec Section 7 — same reasoning as i2s_mic). */
+    /** 16 or 32 only. 24-bit is not supported (see implementation spec
+     *  Section 7 — same reasoning as i2s_mic). */
     int bits_per_sample;
 
     /** 1 = mono, 2 = stereo. Must match slot_mode exactly (validated at
@@ -57,7 +63,7 @@ typedef struct {
      *  channel_count. */
     i2s_slot_mode_t slot_mode;
 
-    /** Mandatory GPIOs — there is no "unused" convention for these in V1. */
+    /** Mandatory GPIOs — there is no "unused" convention for these. */
     int gpio_bck;
     int gpio_ws;
     int gpio_data;
@@ -66,31 +72,35 @@ typedef struct {
      *  because ESP-IDF v6.0 removed the `i2s_port_t` type in favor of int.
      *  On chips with two I2S peripherals, the recommended convention when
      *  running i2s_mic and i2s_spk together is I2S_NUM_0 for i2s_mic and
-     *  I2S_NUM_1 for i2s_spk. On single-peripheral chips, simultaneous
-     *  i2s_mic + i2s_spk operation is out of scope for V1 — see the
-     *  implementation spec's Section 10. */
+     *  I2S_NUM_1 for i2s_spk. */
     int port;
 
-    /** Passed directly as ESP-IDF's own DMA descriptor count
-     *  (dma_desc_num). Not independently validated by this component. */
+    /** Number of DMA buffers in the TX ring (ESP-IDF's dma_desc_num).
+     *  Must be >= 2. Together with dma_buffer_size this sets the output
+     *  latency — see the README's "Latency" section. */
     int dma_buffer_count;
 
-    /** Bytes of audio payload consumed from one application buffer per
-     *  i2s_spk_send_buffer() call's worth of DMA descriptor sizing. Must
-     *  be an exact multiple of channel_count * (bits_per_sample / 8), or
-     *  init() fails with ESP_ERR_INVALID_ARG. Note that, unlike i2s_mic,
-     *  this value only sizes ESP-IDF's internal DMA descriptors — the
-     *  application is free to call i2s_spk_send_buffer() with any buffer
-     *  length it likes; it is not required to match dma_buffer_size. */
+    /** Size of one DMA buffer in bytes. Must be an exact multiple of
+     *  channel_count * (bits_per_sample / 8), and must be a size the
+     *  driver can allocate exactly (at most 4092 bytes on ESP32, -S3, -C3
+     *  and -C6). init() reads back the allocation with
+     *  i2s_channel_get_info() and fails with ESP_ERR_INVALID_SIZE if the
+     *  driver clamped or rounded it. The application may call
+     *  i2s_spk_send_buffer() with any length; it need not match this. */
     int dma_buffer_size;
 
-    /** Max time i2s_spk_send_buffer() blocks waiting for the requested
-     *  bytes to be submitted to TX DMA. portMAX_DELAY for "block
-     *  indefinitely," which is what makes the blocking call itself the
-     *  pacing mechanism for a real-time producer (see the design
-     *  document's Section 5.2 and Section 10.1's guidance on using this
-     *  for example-level flow control). */
-    TickType_t write_timeout;
+    /** Max time, in milliseconds, i2s_spk_send_buffer() waits for each
+     *  free DMA buffer. I2S_SPK_WAIT_FOREVER blocks until accepted, which
+     *  is what makes the blocking call itself the pacing mechanism for a
+     *  real-time producer. Note: the timeout applies to each buffer
+     *  acquisition inside the call, not to the call as a whole, so a call
+     *  spanning several DMA buffers can block for longer than this in
+     *  total while it keeps making progress.
+     *
+     *  (Before 0.2.0 this field was `TickType_t write_timeout` and was
+     *  passed through to the driver unconverted, which made every finite
+     *  timeout too short whenever the tick rate was not 1000 Hz.) */
+    uint32_t write_timeout_ms;
 
     void *user_ctx;
 } i2s_spk_config_t;
@@ -102,14 +112,21 @@ typedef struct {
  *   - ESP_OK
  *   - ESP_ERR_INVALID_ARG    NULL config; unsupported bits_per_sample (not
  *                            16 or 32); channel_count/slot_mode mismatch;
- *                            dma_buffer_size not an exact multiple of
+ *                            dma_buffer_count < 2; dma_buffer_size not a
+ *                            positive exact multiple of
  *                            channel_count * (bits_per_sample/8)
+ *   - ESP_ERR_INVALID_SIZE   the driver did not allocate exactly
+ *                            dma_buffer_count * dma_buffer_size bytes of
+ *                            DMA buffer (dma_buffer_size above the
+ *                            driver's per-buffer limit, or adjusted for
+ *                            cache alignment)
  *   - ESP_ERR_INVALID_STATE  already INITIALIZED or RUNNING
  *   - ESP_ERR_NO_MEM         allocation failure
  *   - any other esp_err_t propagated unchanged from the underlying
- *     ESP-IDF I2S driver calls (i2s_new_channel, i2s_channel_init_std_mode)
+ *     ESP-IDF I2S driver calls (i2s_new_channel, i2s_channel_init_std_mode,
+ *     i2s_channel_register_event_callback, i2s_channel_get_info)
  */
-esp_err_t i2s_spk_init(i2s_spk_config_t *config);
+esp_err_t i2s_spk_init(const i2s_spk_config_t *config);
 
 /**
  * @brief Tear down the speaker component and release the underlying
@@ -122,7 +139,12 @@ esp_err_t i2s_spk_init(i2s_spk_config_t *config);
 esp_err_t i2s_spk_deinit(void);
 
 /**
- * @brief Start playback (enables the TX channel).
+ * @brief Start playback (enables the TX channel) and reset the underrun
+ *        count to 0.
+ *
+ * Note: DMA buffers keep their contents across stop()/start(). Audio that
+ * was written but had not yet played when stop() was called can play
+ * after the next start().
  *
  * @return ESP_OK, ESP_ERR_INVALID_STATE (not INITIALIZED), or an esp_err_t
  *         propagated unchanged from i2s_channel_enable().
@@ -133,13 +155,10 @@ esp_err_t i2s_spk_start(void);
  * @brief Stop playback.
  *
  * Calls i2s_channel_disable() to halt DMA output. If an i2s_spk_send_buffer()
- * call is blocked in progress on another task when i2s_spk_stop() is called,
- * this function does not cancel or interrupt it — it simply waits behind
- * ESP-IDF's own internal per-channel synchronization for as long as that
- * call takes to return (up to that call's own write_timeout in the worst
- * case). i2s_spk_stop() must not be used as a cancellation mechanism for an
- * in-flight i2s_spk_send_buffer() call. See the implementation
- * specification's Section 5 for the exact guarantee and its derivation.
+ * call is in progress on another task, the driver tells it to stop and
+ * waits for it to return; that normally takes at most one DMA buffer
+ * period, because the writer re-checks the channel state each time a DMA
+ * buffer is freed. i2s_spk_stop() is not a general cancellation mechanism.
  *
  * @return ESP_OK, ESP_ERR_INVALID_STATE (not RUNNING), or an esp_err_t
  *         propagated unchanged from i2s_channel_disable().
@@ -150,12 +169,11 @@ esp_err_t i2s_spk_stop(void);
  * @brief Send an application-owned buffer of audio to be played.
  *
  * Blocking call, wrapping i2s_channel_write() in the caller's own task
- * context. Waits according to i2s_spk_config_t::write_timeout until the
- * requested bytes have been submitted to TX DMA.
+ * context. Waits according to i2s_spk_config_t::write_timeout_ms until the
+ * requested bytes have been copied into TX DMA buffers.
  *
- * There is no separate "buffer consumed" callback: the buffer is safe for
- * the application to reuse or refill as soon as this call returns,
- * regardless of outcome (design document Section 5.2).
+ * The buffer is safe for the application to reuse or refill as soon as
+ * this call returns, regardless of outcome.
  *
  * On normal full success: returns ESP_OK and *bytes_sent == buffer_len.
  *
@@ -163,26 +181,60 @@ esp_err_t i2s_spk_stop(void);
  * actually transferred, which may be less than buffer_len.
  *
  * If i2s_spk_stop() concurrently disables the channel, this call may
- * instead return ESP_OK with *bytes_sent < buffer_len, depending on the
- * exact interleaving with the underlying ESP-IDF write loop. Callers must
- * therefore check *bytes_sent against buffer_len on every return, not only
- * when the return value is ESP_ERR_TIMEOUT.
+ * instead return ESP_OK with *bytes_sent < buffer_len. Callers must
+ * therefore check *bytes_sent against buffer_len on every return.
+ *
+ * If called while the component is INITIALIZED but not RUNNING, the
+ * driver waits up to write_timeout_ms for the channel to be started and
+ * then returns ESP_ERR_INVALID_STATE.
  *
  * @param buffer      Application-owned buffer containing audio to play.
- * @param buffer_len   Length of `buffer` in bytes.
- * @param bytes_sent   Out param: bytes actually submitted to TX DMA. Must
- *                     not be NULL.
+ * @param buffer_len  Length of `buffer` in bytes.
+ * @param bytes_sent  Out param: bytes actually copied to TX DMA. Must not
+ *                    be NULL.
  *
  * @return
- *   - ESP_OK           (check *bytes_sent — may be a partial transfer, see
- *                       above)
- *   - ESP_ERR_TIMEOUT  partial transfer; write_timeout elapsed
+ *   - ESP_OK           (check *bytes_sent — may be a partial transfer)
+ *   - ESP_ERR_TIMEOUT  partial transfer; write_timeout_ms elapsed while
+ *                      waiting for a free DMA buffer
  *   - ESP_ERR_INVALID_ARG    buffer is NULL, buffer_len is 0, or
  *                            bytes_sent is NULL
- *   - ESP_ERR_INVALID_STATE  component is UNINITIALIZED
+ *   - ESP_ERR_INVALID_STATE  component is UNINITIALIZED, or the channel
+ *                            was not running (see above)
  *   - any other esp_err_t propagated unchanged from i2s_channel_write()
  */
-esp_err_t i2s_spk_send_buffer(uint8_t *buffer, size_t buffer_len, size_t *bytes_sent);
+esp_err_t i2s_spk_send_buffer(const uint8_t *buffer, size_t buffer_len, size_t *bytes_sent);
+
+/**
+ * @brief Number of DMA underruns since the last i2s_spk_start().
+ *
+ * Incremented from the I2S TX DMA interrupt (ESP-IDF's on_send_q_ovf
+ * event) each time a DMA buffer finishes playing while every free DMA
+ * buffer is still unclaimed by the application. One count is roughly one
+ * DMA buffer period of silence played because no new audio arrived in
+ * time.
+ *
+ * How to read it:
+ *   - A writer that blocks in i2s_spk_send_buffer() keeps about N-1 DMA
+ *     buffers of audio queued (N = dma_buffer_count). A gap of P buffer
+ *     periods in which the application writes nothing therefore adds about
+ *     max(0, P - (N - 1)) counts, measured from the return of the last
+ *     write (+/-1 depending on where the gap falls relative to DMA buffer
+ *     boundaries). Each count is registered as a buffer of silence starts
+ *     to play. Short stalls are absorbed by the queued audio and do not
+ *     count.
+ *   - The count also rises whenever the application deliberately stops
+ *     writing (between sounds, after the last buffer), so it only means
+ *     "underrun" while the application intends to feed continuously.
+ *   - If the first write comes more than N-1 buffer periods after
+ *     i2s_spk_start(), counts accrue before any audio is written.
+ *   - Requires CONFIG_I2S_ISR_IRAM_SAFE for accuracy across flash writes
+ *     (see the file header comment).
+ *
+ * Safe to call from any task at any time; returns 0 before the first
+ * i2s_spk_init().
+ */
+uint32_t i2s_spk_get_underrun_count(void);
 
 #ifdef __cplusplus
 }

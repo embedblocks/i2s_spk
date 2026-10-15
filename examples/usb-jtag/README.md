@@ -155,11 +155,11 @@ completed stream.
 6. Logging is re-enabled once the end marker is seen, and a one-line
    summary is printed: chunks played, `short_write_count` (times
    `i2s_spk_send_buffer()` didn't fully consume what it was given —
-   driver-confirmed, not a heuristic), and `underrun_estimate_count` (a
-   best-effort, timing-based *guess* at how many times TX DMA likely ran
-   dry waiting for the next chunk — see `i2s_spk`'s README, "On
-   underrun/overrun tracking," for why this can only be an estimate and
-   why it lives here in the example rather than in the component).
+   driver-confirmed), and the number of DMA underruns during the session
+   — DMA buffers that played as silence because the next chunk arrived
+   late (from `i2s_spk_get_underrun_count()`, measured from just before
+   the session's first write; see `i2s_spk`'s README, "Underrun
+   counter").
 7. The firmware then goes back to waiting for the next trigger.
 
 ## Known limitations of this example (not of `i2s_spk`)
@@ -167,9 +167,6 @@ completed stream.
 - One playback session at a time — no mixing, no queueing multiple files.
 - No compression, no format negotiation beyond the fixed 16 kHz/16-bit/
   mono the PC script always converts to.
-- `underrun_estimate_count` is exactly that — an estimate, not a
-  hardware-confirmed count. See `i2s_spk`'s README for why no confirmed
-  signal exists in V1.
 - Sharing the console channel for both logging and the audio stream means
   you lose console log visibility for the duration of each playback
   session.

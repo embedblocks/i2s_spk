@@ -1,0 +1,14 @@
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y
+
+# Recommended for any real-time audio use; see the component README.
+# Set to n (idf.py menuconfig, or sdkconfig.defaults.iram_off) to see what
+# the flash-erase stress test reports without it.
+CONFIG_I2S_ISR_IRAM_SAFE=y
+
+# The timeout-units test is only meaningful when the tick rate is not
+# 1000 Hz (ESP-IDF's default is 100 Hz). Keep it at the default.
+CONFIG_FREERTOS_HZ=100
+
+CONFIG_ESP_TASK_WDT_EN=n

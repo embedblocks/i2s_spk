@@ -1,13 +1,11 @@
 /*
  * i2s_spk — implementation.
  *
- * See include/i2s_spk.h and the design/implementation-specification
- * documents for the contract this file implements. Section references in
- * comments below refer to the implementation specification unless noted
- * otherwise.
+ * See i2s_spk.h and the design/implementation-specification documents for
+ * the contract this file implements. Section references in comments below
+ * refer to the implementation specification unless noted otherwise.
  *
- * Unlike i2s_mic, this component touches exactly one synchronization
- * primitive:
+ * Synchronization:
  *
  *   `s_spk.lifecycle_mutex` — an ordinary FreeRTOS mutex guarding the
  *   public lifecycle state and its transitions. init()/start()/stop()/
@@ -15,42 +13,35 @@
  *   blocking mutex is correct and sufficient (spec Section 2's speaker
  *   paragraph, Section 5).
  *
- * There is deliberately no ISR-safe critical section, no pending-buffer
- * queue, and no `in_flight` counter here: i2s_spk has no application-facing
- * ISR callback at all (design document Section 5.2) — i2s_spk_send_buffer()
- * is an ordinary blocking call in the caller's own task context, and its
- * return is the sole completion signal. Adding any of the mic's ISR-side
- * machinery here would be inventing synchronization the design doesn't
- * call for; see the implementation spec's Section 13 "Do Not Invent" list.
+ *   `s_spk.underrun_count` — a volatile 32-bit counter with a single writer,
+ *   the driver's TX DMA interrupt (via on_send_q_ovf). It is reset only in
+ *   start(), while the channel is disabled and the interrupt cannot fire,
+ *   and read from any task; aligned 32-bit loads and stores are atomic on
+ *   all supported targets, so no lock is needed.
  *
- * i2s_spk_send_buffer() itself intentionally does NOT take the lifecycle
- * mutex. This is a deliberate consequence of the spec's own account of how
- * i2s_spk_stop() interacts with an in-flight send (spec Section 5, the
- * "Speaker: i2s_spk_stop() called concurrently..." paragraph): the
- * blocking-until-resolved behavior described there is enforced by
- * ESP-IDF's own internal per-channel binary semaphore inside
- * i2s_channel_write()/i2s_channel_disable(), not by this component's
- * lifecycle mutex. If send_buffer() held the lifecycle mutex for the
- * duration of its (potentially long, write_timeout-bounded) call, a
- * concurrent stop() would block on that mutex instead of on
- * i2s_channel_disable()'s own semaphore wait — a different, undocumented
- * interleaving the spec does not describe. Instead, send_buffer() performs
- * an unsynchronized read of a "fully constructed" flag (the same pattern
- * used by i2s_mic_request_buffer() for its UNINITIALIZED check, spec
- * Section 2's note) to reject calls made before init() or after deinit(),
- * then calls straight into i2s_channel_write(), whose own internal
- * synchronization against a concurrent stop()/disable() is what the spec
- * section above describes and relies on.
+ * i2s_spk_send_buffer() intentionally does NOT take the lifecycle mutex.
+ * Its interaction with a concurrent i2s_spk_stop() is governed by
+ * ESP-IDF's own per-channel binary semaphore inside
+ * i2s_channel_write()/i2s_channel_disable(): disable() marks the channel
+ * stopped and waits for the writer, which re-checks the state each time a
+ * DMA buffer frees up. If send_buffer() held the lifecycle mutex for its
+ * whole (write_timeout_ms-bounded) call, a concurrent stop() would block on
+ * that mutex instead — a different interleaving from the one the spec
+ * describes. Instead, send_buffer() reads an unsynchronized "fully
+ * constructed" flag (the same pattern as i2s_mic) to reject calls made
+ * before init() or after deinit().
  */
 #include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <inttypes.h>
 
 #include "i2s_spk.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 
 static const char *TAG = "i2s_spk";
@@ -67,16 +58,18 @@ typedef struct {
     spk_lifecycle_state_t state;
 
     /* Set once by init() after everything below is fully constructed;
-     * cleared once by deinit() before it frees/releases anything.
-     * Deliberately an ordinary, unsynchronized flag, read without any lock
-     * by i2s_spk_send_buffer() — see the file header comment and spec
-     * Section 2's note on i2s_mic_request_buffer()'s analogous check for
-     * why this is safe: init()/deinit() are not invoked concurrently with
-     * send_buffer() on the same instance by contract. */
+     * cleared once by deinit() before it frees/releases anything. Read
+     * without a lock by i2s_spk_send_buffer() — init()/deinit() are not
+     * invoked concurrently with send_buffer() by contract. */
     volatile bool initialized_flag;
 
+    /* Written only by the TX DMA ISR (spk_on_send_q_ovf) and by start()
+     * while the channel is disabled. Lives in .bss, i.e. internal DRAM,
+     * so it is safe to touch from an IRAM-safe ISR. */
+    volatile uint32_t underrun_count;
+
     /* --- Effectively read-only after init(), before deinit() --- */
-    TickType_t write_timeout;
+    uint32_t write_timeout_ms;
     void *user_ctx;
     i2s_chan_handle_t tx_handle;
 } i2s_spk_ctx_t;
@@ -84,10 +77,28 @@ typedef struct {
 static i2s_spk_ctx_t s_spk = { 0 };
 
 /* ------------------------------------------------------------------------
+ * TX DMA interrupt callback
+ * ---------------------------------------------------------------------- */
+
+/* Called by the driver from its TX DMA interrupt when a DMA buffer finishes
+ * playing while its free-buffer queue is already full — every free buffer
+ * is unclaimed, so DMA is now replaying buffers that auto_clear has zeroed.
+ * IRAM_ATTR unconditionally: required when CONFIG_I2S_ISR_IRAM_SAFE is
+ * enabled (the driver rejects non-IRAM callbacks then), harmless when not. */
+static bool IRAM_ATTR spk_on_send_q_ovf(i2s_chan_handle_t handle, i2s_event_data_t *event, void *user_ctx)
+{
+    (void)handle;
+    (void)event;
+    (void)user_ctx;
+    s_spk.underrun_count = s_spk.underrun_count + 1;
+    return false;   /* no task woken */
+}
+
+/* ------------------------------------------------------------------------
  * init / deinit / start / stop
  * ---------------------------------------------------------------------- */
 
-esp_err_t i2s_spk_init(i2s_spk_config_t *config)
+esp_err_t i2s_spk_init(const i2s_spk_config_t *config)
 {
     if (config == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -101,10 +112,14 @@ esp_err_t i2s_spk_init(i2s_spk_config_t *config)
     if (!slot_mode_ok) {
         return ESP_ERR_INVALID_ARG;
     }
+    /* The driver sizes its free-buffer queue as dma_desc_num - 1, so one
+     * buffer would leave no queue at all. */
+    if (config->dma_buffer_count < 2) {
+        return ESP_ERR_INVALID_ARG;
+    }
 
     /* slot_bit_width == bits_per_sample for the 16/32-bit cases this
-     * component supports (implementation spec Section 7, same reasoning as
-     * i2s_mic). */
+     * component supports (implementation spec Section 7). */
     const int slot_bit_width = config->bits_per_sample;
     const int bytes_per_frame = config->channel_count * (slot_bit_width / 8);
     if (config->dma_buffer_size <= 0 || (config->dma_buffer_size % bytes_per_frame) != 0) {
@@ -130,12 +145,10 @@ esp_err_t i2s_spk_init(i2s_spk_config_t *config)
     chan_cfg.dma_desc_num = config->dma_buffer_count;
     chan_cfg.dma_frame_num = dma_frame_num;
     /* Implementation spec Section 12: must be explicitly set to true. The
-     * driver's own default is false — silence-on-underrun does not happen
-     * for free. auto_clear is a union alias of auto_clear_after_cb in the
-     * pinned v6.0.x headers; auto_clear_before_cb is a distinct sibling
-     * field for a use case this component has no need for (no TX
-     * application callback exists at all — see the header comment) and is
-     * deliberately left at its own default of false. */
+     * driver's own default is false. auto_clear is a union alias of
+     * auto_clear_after_cb in the v6.0.x headers: the driver zeroes each
+     * buffer after it has played, so a buffer the application does not
+     * refill plays as silence. */
     chan_cfg.auto_clear = true;
 
     i2s_chan_handle_t tx_handle = NULL;
@@ -167,14 +180,44 @@ esp_err_t i2s_spk_init(i2s_spk_config_t *config)
     ret = i2s_channel_init_std_mode(tx_handle, &std_cfg);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "i2s_channel_init_std_mode failed: %s", esp_err_to_name(ret));
-        i2s_del_channel(tx_handle);
-        xSemaphoreGive(s_spk.lifecycle_mutex);
-        return ret;
+        goto fail_del_channel;
     }
 
-    s_spk.write_timeout = config->write_timeout;
+    /* The DMA buffers are allocated by i2s_channel_init_std_mode(). The
+     * driver silently clamps a buffer above its per-descriptor limit (and
+     * may round it for cache alignment on some targets), logging only a
+     * warning. Either would change the latency and the unit the underrun
+     * counter counts in, so read back what was actually allocated and
+     * reject any difference — the same check i2s_mic performs. */
+    i2s_chan_info_t info;
+    ret = i2s_channel_get_info(tx_handle, &info);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "i2s_channel_get_info failed: %s", esp_err_to_name(ret));
+        goto fail_del_channel;
+    }
+    const uint32_t requested = (uint32_t)config->dma_buffer_count * (uint32_t)config->dma_buffer_size;
+    if (info.total_dma_buf_size != requested) {
+        ESP_LOGE(TAG, "driver allocated %" PRIu32 " bytes of DMA buffer, requested %" PRIu32
+                 " (%d x %d); dma_buffer_size is probably above the driver's per-buffer limit",
+                 info.total_dma_buf_size, requested, config->dma_buffer_count, config->dma_buffer_size);
+        ret = ESP_ERR_INVALID_SIZE;
+        goto fail_del_channel;
+    }
+
+    /* Must be registered while the channel is READY (before enable). */
+    const i2s_event_callbacks_t cbs = {
+        .on_send_q_ovf = spk_on_send_q_ovf,
+    };
+    ret = i2s_channel_register_event_callback(tx_handle, &cbs, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "i2s_channel_register_event_callback failed: %s", esp_err_to_name(ret));
+        goto fail_del_channel;
+    }
+
+    s_spk.write_timeout_ms = config->write_timeout_ms;
     s_spk.user_ctx = config->user_ctx;
     s_spk.tx_handle = tx_handle;
+    s_spk.underrun_count = 0;
 
     s_spk.state = SPK_STATE_INITIALIZED;
     /* Set last, after every other field above is fully constructed —
@@ -183,6 +226,11 @@ esp_err_t i2s_spk_init(i2s_spk_config_t *config)
 
     xSemaphoreGive(s_spk.lifecycle_mutex);
     return ESP_OK;
+
+fail_del_channel:
+    i2s_del_channel(tx_handle);
+    xSemaphoreGive(s_spk.lifecycle_mutex);
+    return ret;
 }
 
 esp_err_t i2s_spk_deinit(void)
@@ -197,8 +245,7 @@ esp_err_t i2s_spk_deinit(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* Cleared before anything is released — mirrors i2s_mic_deinit()'s
-     * ordering for the same reason (spec Section 2's note). */
+    /* Cleared before anything is released — mirrors i2s_mic_deinit(). */
     s_spk.initialized_flag = false;
 
     esp_err_t ret = i2s_del_channel(s_spk.tx_handle);
@@ -208,7 +255,7 @@ esp_err_t i2s_spk_deinit(void)
 
     s_spk.tx_handle = NULL;
     s_spk.user_ctx = NULL;
-    s_spk.write_timeout = 0;
+    s_spk.write_timeout_ms = 0;
 
     s_spk.state = SPK_STATE_UNINITIALIZED;
 
@@ -227,6 +274,10 @@ esp_err_t i2s_spk_start(void)
         xSemaphoreGive(s_spk.lifecycle_mutex);
         return ESP_ERR_INVALID_STATE;
     }
+
+    /* Reset while the channel is still disabled, so the ISR cannot be
+     * incrementing concurrently. */
+    s_spk.underrun_count = 0;
 
     esp_err_t ret = i2s_channel_enable(s_spk.tx_handle);
     if (ret != ESP_OK) {
@@ -247,15 +298,12 @@ esp_err_t i2s_spk_stop(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* Held for stop()'s entire execution, exactly as for i2s_mic_stop() —
-     * serializes against a second concurrent stop()/start() (spec Section
-     * 2/5's speaker paragraph). Note this does NOT, by itself, make
-     * i2s_channel_disable() return quickly: if a i2s_spk_send_buffer()
-     * call is in progress on another task, i2s_channel_disable() blocks
-     * waiting on ESP-IDF's own internal per-channel binary semaphore until
-     * that write returns — see the file header comment and spec Section 5.
-     * This function must not be used, or documented, as a way to cancel an
-     * in-flight send. */
+    /* Held for stop()'s entire execution — serializes against a second
+     * concurrent stop()/start(). If an i2s_spk_send_buffer() call is in
+     * progress on another task, i2s_channel_disable() marks the channel
+     * stopped and waits on ESP-IDF's internal per-channel semaphore until
+     * that write notices and returns (normally within one DMA buffer
+     * period). */
     xSemaphoreTake(s_spk.lifecycle_mutex, portMAX_DELAY);
 
     if (s_spk.state != SPK_STATE_RUNNING) {
@@ -278,25 +326,24 @@ esp_err_t i2s_spk_stop(void)
  * i2s_spk_send_buffer — blocking, ordinary task context only
  * ---------------------------------------------------------------------- */
 
-esp_err_t i2s_spk_send_buffer(uint8_t *buffer, size_t buffer_len, size_t *bytes_sent)
+esp_err_t i2s_spk_send_buffer(const uint8_t *buffer, size_t buffer_len, size_t *bytes_sent)
 {
     if (buffer == NULL || buffer_len == 0 || bytes_sent == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    /* Unsynchronized read by design — see the file header comment and
-     * i2s_mic_request_buffer()'s identical pattern (spec Section 2's
-     * note). init()/deinit() are not invoked concurrently with this call
-     * on the same instance by contract, so this is race-free in practice
-     * even though it is not lock-protected. */
+    /* Unsynchronized read by design — see the file header comment. */
     if (!s_spk.initialized_flag) {
         *bytes_sent = 0;
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* i2s_channel_write()'s own internal per-channel synchronization is
-     * what governs interaction with a concurrent i2s_spk_stop() — see the
-     * file header comment and implementation spec Section 5. This
-     * component does not add its own locking around this call. */
-    return i2s_channel_write(s_spk.tx_handle, buffer, buffer_len, bytes_sent, s_spk.write_timeout);
+    /* i2s_channel_write() takes its timeout in milliseconds and converts it
+     * with pdMS_TO_TICKS() itself. */
+    return i2s_channel_write(s_spk.tx_handle, buffer, buffer_len, bytes_sent, s_spk.write_timeout_ms);
+}
+
+uint32_t i2s_spk_get_underrun_count(void)
+{
+    return s_spk.underrun_count;
 }

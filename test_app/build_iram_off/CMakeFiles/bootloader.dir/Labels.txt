@@ -1,0 +1,13 @@
+# Target labels
+ bootloader
+# Source files and their labels
+E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/build_iram_off/CMakeFiles/bootloader
+E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/build_iram_off/CMakeFiles/bootloader.rule
+E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/build_iram_off/CMakeFiles/bootloader-complete.rule
+E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/build_iram_off/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule
+E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/build_iram_off/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule
+E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/build_iram_off/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule
+E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/build_iram_off/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule
+E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/build_iram_off/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule
+E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/build_iram_off/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule
+E:/vscodeespidf/projectworkspace/components-new/i2s_spk/i2s_spk/test_app/build_iram_off/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule

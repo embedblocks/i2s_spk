@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 
 
+## [0.2.0] - 2026-10-14
+
+This release contains a breaking API change (`write_timeout` →
+`write_timeout_ms`) and corrects a documentation error carried since
+0.1.0.
+
+### Fixed
+- **Timeout units.** `i2s_channel_write()` takes its timeout in
+  milliseconds and converts it with `pdMS_TO_TICKS()` itself, but
+  `i2s_spk_send_buffer()` passed `i2s_spk_config_t::write_timeout` (a
+  `TickType_t`) straight through. At ESP-IDF's default 100 Hz tick rate
+  every finite timeout was 10× too short. `portMAX_DELAY` happened to
+  still behave as "forever".
+- **Underrun documentation.** The README, header and the 0.1.0 entry
+  below said ESP-IDF has no TX underrun hook and that `on_send_q_ovf`
+  reports the application supplying data *faster* than it can be sent.
+  That is backwards: the driver raises `on_send_q_ovf` when a DMA buffer
+  finishes playing while every free buffer is still unclaimed by the
+  application — DMA has run out of fresh audio. When the application is
+  faster, `i2s_channel_write()` simply blocks.
+
+### Changed
+- **Breaking:** `i2s_spk_config_t::write_timeout` (`TickType_t`) is
+  replaced by `write_timeout_ms` (`uint32_t`, milliseconds). Use the new
+  `I2S_SPK_WAIT_FOREVER` (`UINT32_MAX`) where you used `portMAX_DELAY`.
+  The timeout applies to each wait for a free DMA buffer inside the call,
+  not to the call as a whole.
+- `i2s_spk_init()` now takes `const i2s_spk_config_t *` and
+  `i2s_spk_send_buffer()` takes `const uint8_t *` (source-compatible).
+- `i2s_spk_init()` now rejects `dma_buffer_count < 2`
+  (`ESP_ERR_INVALID_ARG`), and reads back the DMA allocation with
+  `i2s_channel_get_info()`, returning `ESP_ERR_INVALID_SIZE` if the driver
+  did not allocate exactly `dma_buffer_count × dma_buffer_size` bytes.
+  The driver silently clamps buffers above 4092 bytes; the README's old
+  4096-byte usage example was affected.
+- Examples: the timing-based `underrun_estimate_count` heuristic is
+  replaced by the measured count; `loopback-dual-i2s` and `loopback` now
+  log it too. All examples use `write_timeout_ms = I2S_SPK_WAIT_FOREVER`.
+
+### Added
+- `i2s_spk_get_underrun_count()`: DMA underruns since the last
+  `i2s_spk_start()`, counted from the driver's `on_send_q_ovf` event by an
+  always-`IRAM_ATTR` callback. See the README's "Underrun counter" for how
+  to read it (a gap of P buffer periods adds about max(0, P − (N − 1))).
+- README: "Latency" section (formula, worked numbers, the trade-off
+  against stall tolerance) — the old usage example's 6 × 4096-byte mono
+  ring meant ~768 ms of output latency; "Real-time use" section
+  recommending `CONFIG_I2S_ISR_IRAM_SAFE`; note that stale audio can
+  replay after `stop()`/`start()`.
+- `test_app/`: on-target Unity tests (init validation, lifecycle and leak
+  checks, timeout units, underrun counter U1–U4, `stop()` during a blocked
+  send, flash-erase stress on a dedicated `scratch` partition).
+
 ## [0.1.3] - 2026-10-02
 
 The component's code and API are unchanged; this release updates an
@@ -72,7 +125,8 @@ example and the registry metadata.
 - `auto_clear` enabled on the TX channel so ESP-IDF inserts silence rather
   than repeating stale data or stalling when the application falls behind
   (no software-level underrun detection in V1 — ESP-IDF provides no driver
-  hook for it; see the design document's Open Question 2).
+  hook for it; see the design document's Open Question 2). *Corrected in
+  0.2.0: the driver does provide one, `on_send_q_ovf`.*
 - Support for 16-bit and 32-bit sample widths, Philips I2S standard slot
   format, `I2S_ROLE_MASTER`.
 - Full lifecycle API: `i2s_spk_init()`, `i2s_spk_start()`,

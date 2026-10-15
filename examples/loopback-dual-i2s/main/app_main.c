@@ -153,7 +153,7 @@ static void audio_relay_task(void *arg)
         }
 
         size_t out_len = convert_for_speaker(s_mic_buf, bytes_read, s_spk_buf);
-        uint8_t *out = (uint8_t *)s_spk_buf;   /* i2s_spk_send_buffer() takes a non-const pointer */
+        const uint8_t *out = (const uint8_t *)s_spk_buf;
 
         size_t sent = 0;
         while (sent < out_len) {
@@ -177,18 +177,20 @@ static void audio_relay_task(void *arg)
 static void status_report_task(void *arg)
 {
     (void)arg;
-    uint32_t last_lost = 0, last_short = 0;
+    uint32_t last_lost = 0, last_short = 0, last_underrun = 0;
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(2000));
         uint32_t lost = i2s_mic_get_overflow_count();
         uint32_t shortw = s_short_write_count;
-        if (lost != last_lost || shortw != last_short) {
-            ESP_LOGW(TAG, "mic: audio lost %u buffers (%u ms) | spk: short_write=%u",
+        uint32_t underrun = i2s_spk_get_underrun_count();
+        if (lost != last_lost || shortw != last_short || underrun != last_underrun) {
+            ESP_LOGW(TAG, "mic: audio lost %u buffers (%u ms) | spk: short_write=%u underrun=%u",
                      (unsigned)lost, (unsigned)(lost * BUF_FRAMES * 1000u / SAMPLE_RATE),
-                     (unsigned)shortw);
+                     (unsigned)shortw, (unsigned)underrun);
             last_lost = lost;
             last_short = shortw;
+            last_underrun = underrun;
         }
     }
 }
@@ -225,7 +227,7 @@ void app_main(void)
                                * file header. */
         .dma_buffer_count = SPK_DMA_BUFFER_COUNT,
         .dma_buffer_size = SPK_DMA_BUFFER_SIZE,
-        .write_timeout = portMAX_DELAY,
+        .write_timeout_ms = I2S_SPK_WAIT_FOREVER,
         .user_ctx = NULL,
     };
 

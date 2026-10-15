@@ -1,0 +1,7 @@
+# Layer on top of sdkconfig.defaults to run the suite with the I2S ISR NOT
+# IRAM-safe:
+#   idf.py -B build_iram_off \
+#     -DSDKCONFIG=sdkconfig.iram_off \
+#     -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.iram_off" \
+#     build flash monitor
+CONFIG_I2S_ISR_IRAM_SAFE=n
